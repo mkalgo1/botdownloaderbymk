@@ -384,11 +384,12 @@ class handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed_url = urllib.parse.urlparse(self.path)
-        path = parsed_url.path.rstrip("/").lower()
+        query = urllib.parse.parse_qs(parsed_url.query)
+        action = query.get("action", [""])[0].lower()
         full_path = self.path.lower()
 
         # Direct shortcut file download
-        if "downloader_mk.shortcut" in full_path or full_path.endswith(".shortcut") or "shortcut.bin" in full_path:
+        if action == "shortcut" or "downloader_mk.shortcut" in full_path or full_path.endswith(".shortcut"):
             shortcut_data = generate_shortcut_bytes()
             self.send_response(200)
             self.send_header("Content-Type", "application/x-apple-shortcut")
@@ -399,7 +400,7 @@ class handler(BaseHTTPRequestHandler):
             return
 
         # Interactive Shortcut Webpage
-        if path in ("/shortcut", "/ios", "/ios-shortcut") or "shortcut" in path:
+        if action == "page" or "shortcut" in full_path or "ios" in full_path:
             html = render_shortcut_page()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -409,8 +410,7 @@ class handler(BaseHTTPRequestHandler):
             return
 
         # Direct iOS Shortcut Share Trigger (GET method: /api/share?url=...&chat_id=...)
-        if "share" in path:
-            query = urllib.parse.parse_qs(parsed_url.query)
+        if action == "share" or "share" in full_path:
             target_url = query.get("url", [""])[0]
             chat_id = int(query.get("chat_id", [str(USER_CHAT_ID)])[0])
 
@@ -431,7 +431,7 @@ class handler(BaseHTTPRequestHandler):
             })
             return
 
-        if "ping" in path:
+        if action == "ping" or "ping" in full_path:
             self._send_json(200, {
                 "status": "pong",
                 "message": "Bot is awake and running 24/7 on Vercel",
@@ -441,11 +441,11 @@ class handler(BaseHTTPRequestHandler):
             })
             return
 
-        if "health" in path:
+        if action == "health" or "health" in full_path:
             self._send_json(200, {"status": "healthy"})
             return
 
-        if "setup" in path or "webhook" in path:
+        if action == "setup" or "setup" in full_path:
             webhook_url = "https://botdownloaderbymk.vercel.app/api/webhook"
             res = requests.post(f"{TELEGRAM_API}/setWebhook", json={"url": webhook_url}, timeout=10)
             self._send_json(200, {
@@ -478,8 +478,8 @@ class handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Invalid JSON"})
             return
 
-        parsed_url = urllib.parse.urlparse(self.path)
-        path = parsed_url.path.rstrip("/").lower()
+        raw_path = self.headers.get("x-matched-path") or self.path
+        path = raw_path.split("?")[0].rstrip("/").lower()
 
         # Handle direct share from iOS Shortcut (POST method)
         if "share" in path or ("url" in payload and "message" not in payload):
