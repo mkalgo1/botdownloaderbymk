@@ -235,9 +235,10 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        path = self.path.split("?")[0].rstrip("/")
+        raw_path = self.headers.get("x-matched-path") or self.path
+        path = raw_path.split("?")[0].rstrip("/").lower()
 
-        if path in ("/ping", "/api/ping"):
+        if "ping" in path:
             self._send_json(200, {
                 "status": "pong",
                 "message": "Bot is awake and running 24/7 on Vercel",
@@ -247,11 +248,11 @@ class handler(BaseHTTPRequestHandler):
             })
             return
 
-        if path in ("/health", "/api/health"):
+        if "health" in path:
             self._send_json(200, {"status": "healthy"})
             return
 
-        if path in ("/setup", "/api/setup", "/set_webhook"):
+        if "setup" in path or "webhook" in path:
             webhook_url = "https://botdownloaderbymk.vercel.app/api/webhook"
             res = requests.post(f"{TELEGRAM_API}/setWebhook", json={"url": webhook_url}, timeout=10)
             self._send_json(200, {
