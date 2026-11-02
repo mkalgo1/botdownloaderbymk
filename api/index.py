@@ -383,12 +383,12 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        raw_path = self.headers.get("x-matched-path") or self.path
         parsed_url = urllib.parse.urlparse(self.path)
-        path = (self.headers.get("x-matched-path") or parsed_url.path).rstrip("/").lower()
+        path = parsed_url.path.rstrip("/").lower()
+        full_path = self.path.lower()
 
         # Direct shortcut file download
-        if "downloader_mk.shortcut" in path or path.endswith(".shortcut"):
+        if "downloader_mk.shortcut" in full_path or full_path.endswith(".shortcut") or "shortcut.bin" in full_path:
             shortcut_data = generate_shortcut_bytes()
             self.send_response(200)
             self.send_header("Content-Type", "application/x-apple-shortcut")
@@ -399,7 +399,7 @@ class handler(BaseHTTPRequestHandler):
             return
 
         # Interactive Shortcut Webpage
-        if path in ("/shortcut", "/ios", "/ios-shortcut"):
+        if path in ("/shortcut", "/ios", "/ios-shortcut") or "shortcut" in path:
             html = render_shortcut_page()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -478,8 +478,8 @@ class handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Invalid JSON"})
             return
 
-        raw_path = self.headers.get("x-matched-path") or self.path
-        path = raw_path.split("?")[0].rstrip("/").lower()
+        parsed_url = urllib.parse.urlparse(self.path)
+        path = parsed_url.path.rstrip("/").lower()
 
         # Handle direct share from iOS Shortcut (POST method)
         if "share" in path or ("url" in payload and "message" not in payload):
