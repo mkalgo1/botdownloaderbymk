@@ -5,6 +5,8 @@
     { "source": "/shortcut", "destination": "/api/index.py?action=page" },
     { "source": "/ios", "destination": "/api/index.py?action=page" },
     { "source": "/api/share", "destination": "/api/index.py?action=share" },
+    { "source": "/api/stream", "destination": "/api/index.py?action=stream" },
+    { "source": "/api/download", "destination": "/api/index.py?action=stream" },
     { "source": "/ping", "destination": "/api/index.py?action=ping" },
     { "source": "/health", "destination": "/api/index.py?action=health" },
     { "source": "/setup", "destination": "/api/index.py?action=setup" },
