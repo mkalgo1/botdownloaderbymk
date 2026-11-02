@@ -61,9 +61,57 @@ def extract_snapchat_direct(url: str):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         }
+
+        # Expand shortened links (t.snapchat.com/...)
+        if "t.snapchat.com" in url:
+            try:
+                r_exp = requests.get(url, allow_redirects=True, headers=headers, timeout=8)
+                url = r_exp.url
+            except Exception:
+                pass
+
         resp = requests.get(url, headers=headers, timeout=12)
         html = resp.text
 
+        # 1. Check for Story / Public Profile (__NEXT_DATA__) -> Completely Watermark-Free!
+        m_next = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html)
+        if m_next:
+            try:
+                data = json.loads(m_next.group(1))
+                page_props = data.get("props", {}).get("pageProps", {})
+
+                # Single story
+                story = page_props.get("story")
+                if story and story.get("snapList"):
+                    for snap in story["snapList"]:
+                        media_u = snap.get("snapUrls", {}).get("mediaUrl")
+                        if media_u:
+                            return media_u, "Snapchat Story", int(snap.get("duration", 0))
+
+                # Curated highlights
+                highlights = page_props.get("curatedHighlights", [])
+                for h in highlights:
+                    for snap in h.get("snapList", []):
+                        media_u = snap.get("snapUrls", {}).get("mediaUrl")
+                        if media_u and snap.get("snapMediaType") != 0:
+                            return media_u, h.get("title", "Snapchat Story"), int(snap.get("duration", 0))
+            except Exception as e:
+                logger.warning(f"Next data parsing error: {e}")
+
+        # 2. Check for exact video ID match in Spotlight
+        id_m = re.search(r'spotlight/([A-Za-z0-9_-]+)', url)
+        target_id = id_m.group(1) if id_m else None
+        if target_id and target_id in html:
+            pos = html.find(target_id)
+            sub = html[max(0, pos - 500):min(len(html), pos + 2500)]
+            m_v = re.findall(r'https://(?:bolt-gcdn|cf-st)\.sc-cdn\.net/[^\s"\'<>\\]+\.27\.[^\s"\'<>\\]+', sub)
+            if m_v:
+                clean_u = m_v[0].replace('\\u0026', '&').replace('\\"', '').replace('\\', '')
+                title_m = re.search(r'<title>(.*?)</title>', html, re.IGNORECASE)
+                title = title_m.group(1).split(" | ")[0].strip() if title_m else "Snapchat Spotlight"
+                return clean_u, title, 0
+
+        # 3. Fallback: all matching video URLs
         m_videos = re.findall(r'https://(?:bolt-gcdn|cf-st)\.sc-cdn\.net/[^\s"\'<>]+\.27\.[^\s"\'<>]+', html)
         if not m_videos:
             m_videos = re.findall(r'videoUrl[^:]*:[^"]*"([^"]+)"', html)
@@ -323,6 +371,8 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
                 direct_url = snap_u
                 if snap_t:
                     title = snap_t
+                if snap_d:
+                    duration = int(snap_d)
                 logger.info(f"Snapchat direct extraction succeeded: {direct_url[:80]}")
 
         # 2. Universal yt-dlp extractor fallback
