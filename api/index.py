@@ -46,13 +46,38 @@ def detect_platform(url: str) -> dict:
         return {"name": "Vimeo", "emoji": "🎬", "desc": "Vimeo Video"}
     elif "dailymotion.com" in url_l or "dai.ly" in url_l:
         return {"name": "Dailymotion", "emoji": "📹", "desc": "Dailymotion Video"}
+    elif "snapchat.com" in url_l:
+        return {"name": "Snapchat", "emoji": "👻", "desc": "Snapchat Spotlight / Story"}
     else:
         return {"name": "Web", "emoji": "🌐", "desc": "Universal Web Video"}
 
 
 # -------------------------------------------------------------------
-# SPECIALIZED FAST EXTRACTORS (TikTok No-Watermark)
+# SPECIALIZED FAST EXTRACTORS (TikTok & Snapchat)
 # -------------------------------------------------------------------
+def extract_snapchat_direct(url: str):
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        }
+        resp = requests.get(url, headers=headers, timeout=12)
+        html = resp.text
+
+        m_videos = re.findall(r'https://(?:bolt-gcdn|cf-st)\.sc-cdn\.net/[^\s"\'<>]+\.27\.[^\s"\'<>]+', html)
+        if not m_videos:
+            m_videos = re.findall(r'videoUrl[^:]*:[^"]*"([^"]+)"', html)
+
+        if m_videos:
+            clean_u = m_videos[0].replace('\\u0026', '&').replace('\\"', '').replace('\\', '')
+            title_m = re.search(r'<title>(.*?)</title>', html, re.IGNORECASE)
+            title = title_m.group(1).split(" | ")[0].strip() if title_m else "Snapchat Video"
+            return clean_u, title, 0
+    except Exception as e:
+        logger.warning(f"Snapchat extraction error: {e}")
+    return None, None, None
+
+
 def extract_tiktok_direct(url: str):
     try:
         api_url = f"https://tikwm.com/api/?url={urllib.parse.quote(url, safe=':/?=&')}"
@@ -282,7 +307,7 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
     }
 
     try:
-        # 1. Specialized fast extractor for TikTok (No watermark & avoids 403 CDN blocks)
+        # 1. Specialized fast extractors for TikTok & Snapchat
         if platform.get("name") == "TikTok":
             tk_play, tk_hd, tk_title, tk_dur = extract_tiktok_direct(url)
             if tk_play:
@@ -292,6 +317,13 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
                 if tk_dur:
                     duration = int(tk_dur)
                 logger.info(f"TikWM extraction succeeded for TikTok: {direct_url[:80]}")
+        elif platform.get("name") == "Snapchat":
+            snap_u, snap_t, snap_d = extract_snapchat_direct(url)
+            if snap_u:
+                direct_url = snap_u
+                if snap_t:
+                    title = snap_t
+                logger.info(f"Snapchat direct extraction succeeded: {direct_url[:80]}")
 
         # 2. Universal yt-dlp extractor fallback
         if not direct_url:
@@ -509,59 +541,66 @@ class handler(BaseHTTPRequestHandler):
                     direct_url = tk_hd
                 elif tk_play:
                     direct_url = tk_play
+            elif platform.get("name") == "Snapchat":
+                snap_u, _, _ = extract_snapchat_direct(target_url)
+                if snap_u:
+                    direct_url = snap_u
 
             if not direct_url:
-                fmt_str = (
-                    f"best[height<={q_height}][ext=mp4][acodec!=none]/best[height<={q_height}][ext=mp4]/best[height<={q_height}]/best"
-                    if q_height
-                    else "best[ext=mp4][acodec!=none]/best[ext=mp4]/best"
-                )
-                ydl_opts = {
-                    "quiet": True,
-                    "no_warnings": True,
-                    "noplaylist": True,
-                    "format": fmt_str,
-                    "http_headers": {
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                try:
+                    fmt_str = (
+                        f"best[height<={q_height}][ext=mp4][acodec!=none]/best[height<={q_height}][ext=mp4]/best[height<={q_height}]/best"
+                        if q_height
+                        else "best[ext=mp4][acodec!=none]/best[ext=mp4]/best"
+                    )
+                    ydl_opts = {
+                        "quiet": True,
+                        "no_warnings": True,
+                        "noplaylist": True,
+                        "format": fmt_str,
+                        "http_headers": {
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        }
                     }
-                }
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(target_url, download=False)
-                    if "entries" in info and info["entries"]:
-                        info = info["entries"][0]
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(target_url, download=False)
+                        if "entries" in info and info["entries"]:
+                            info = info["entries"][0]
 
-                chosen_format = None
-                if "formats" in info:
-                    if q_height:
-                        for f in reversed(info["formats"]):
-                            if f.get("url") and f.get("ext") == "mp4" and f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("height") and f.get("height") <= q_height:
-                                chosen_format = f
-                                direct_url = f["url"]
-                                break
+                    chosen_format = None
+                    if "formats" in info:
+                        if q_height:
+                            for f in reversed(info["formats"]):
+                                if f.get("url") and f.get("ext") == "mp4" and f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("height") and f.get("height") <= q_height:
+                                    chosen_format = f
+                                    direct_url = f["url"]
+                                    break
+                        if not direct_url:
+                            for f in reversed(info["formats"]):
+                                if f.get("url") and f.get("ext") == "mp4" and f.get("vcodec") != "none" and f.get("acodec") != "none":
+                                    chosen_format = f
+                                    direct_url = f["url"]
+                                    break
+                        if not direct_url:
+                            for f in reversed(info["formats"]):
+                                if f.get("url") and f.get("ext") == "mp4":
+                                    chosen_format = f
+                                    direct_url = f["url"]
+                                    break
                     if not direct_url:
-                        for f in reversed(info["formats"]):
-                            if f.get("url") and f.get("ext") == "mp4" and f.get("vcodec") != "none" and f.get("acodec") != "none":
-                                chosen_format = f
-                                direct_url = f["url"]
-                                break
-                    if not direct_url:
-                        for f in reversed(info["formats"]):
-                            if f.get("url") and f.get("ext") == "mp4":
-                                chosen_format = f
-                                direct_url = f["url"]
-                                break
-                if not direct_url:
-                    direct_url = info.get("url")
+                        direct_url = info.get("url")
 
-                if chosen_format and chosen_format.get("http_headers"):
-                    stream_headers.update(chosen_format["http_headers"])
-                elif info.get("http_headers"):
-                    stream_headers.update(info["http_headers"])
-                elif "instagram.com" in target_url.lower():
-                    stream_headers["Referer"] = "https://www.instagram.com/"
-                elif "tiktok.com" in target_url.lower():
-                    stream_headers["Referer"] = "https://www.tiktok.com/"
+                    if chosen_format and chosen_format.get("http_headers"):
+                        stream_headers.update(chosen_format["http_headers"])
+                    elif info.get("http_headers"):
+                        stream_headers.update(info["http_headers"])
+                    elif "instagram.com" in target_url.lower():
+                        stream_headers["Referer"] = "https://www.instagram.com/"
+                    elif "tiktok.com" in target_url.lower():
+                        stream_headers["Referer"] = "https://www.tiktok.com/"
+                except Exception as ydl_err:
+                    logger.warning(f"yt-dlp extraction failed: {ydl_err}")
 
             if not direct_url:
                 self._send_json(404, {"error": "Could not extract video stream from URL"})
