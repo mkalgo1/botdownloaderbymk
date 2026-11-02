@@ -62,12 +62,13 @@ def extract_tiktok_direct(url: str):
             if data.get("code") == 0 and data.get("data"):
                 d = data["data"]
                 play_url = d.get("play") or d.get("wmplay")
+                hd_url = d.get("hdplay")
                 title = d.get("title") or "TikTok Video"
                 duration = d.get("duration", 0)
-                return play_url, title, duration
+                return play_url, hd_url, title, duration
     except Exception as e:
         logger.warning(f"TikWM extraction failed: {e}")
-    return None, None, None
+    return None, None, None, None
 
 
 # -------------------------------------------------------------------
@@ -283,9 +284,9 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
     try:
         # 1. Specialized fast extractor for TikTok (No watermark & avoids 403 CDN blocks)
         if platform.get("name") == "TikTok":
-            tk_url, tk_title, tk_dur = extract_tiktok_direct(url)
-            if tk_url:
-                direct_url = tk_url
+            tk_play, tk_hd, tk_title, tk_dur = extract_tiktok_direct(url)
+            if tk_play:
+                direct_url = tk_hd or tk_play
                 if tk_title:
                     title = tk_title
                 if tk_dur:
@@ -485,6 +486,10 @@ class handler(BaseHTTPRequestHandler):
         # Direct Video Stream for iOS Shortcut (Saves straight to iPhone Camera Roll without Telegram)
         if action == "stream" or "stream" in full_path or action == "download" or "download" in full_path:
             raw_url = query.get("url", [""])[0]
+            quality_raw = query.get("quality", ["best"])[0].lower()
+            m_q = re.search(r"\d+", quality_raw)
+            q_height = int(m_q.group(0)) if m_q else None
+
             m = URL_REGEX.search(raw_url)
             target_url = m.group(0) if m else raw_url.strip()
 
@@ -499,16 +504,23 @@ class handler(BaseHTTPRequestHandler):
             }
 
             if platform.get("name") == "TikTok":
-                tk_url, _, _ = extract_tiktok_direct(target_url)
-                if tk_url:
-                    direct_url = tk_url
+                tk_play, tk_hd, _, _ = extract_tiktok_direct(target_url)
+                if q_height and q_height >= 1080 and tk_hd:
+                    direct_url = tk_hd
+                elif tk_play:
+                    direct_url = tk_play
 
             if not direct_url:
+                fmt_str = (
+                    f"best[height<={q_height}][ext=mp4][acodec!=none]/best[height<={q_height}][ext=mp4]/best[height<={q_height}]/best"
+                    if q_height
+                    else "best[ext=mp4][acodec!=none]/best[ext=mp4]/best"
+                )
                 ydl_opts = {
                     "quiet": True,
                     "no_warnings": True,
                     "noplaylist": True,
-                    "format": "best[ext=mp4][acodec!=none]/best[ext=mp4]/best",
+                    "format": fmt_str,
                     "http_headers": {
                         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -521,11 +533,18 @@ class handler(BaseHTTPRequestHandler):
 
                 chosen_format = None
                 if "formats" in info:
-                    for f in reversed(info["formats"]):
-                        if f.get("url") and f.get("ext") == "mp4" and f.get("vcodec") != "none" and f.get("acodec") != "none":
-                            chosen_format = f
-                            direct_url = f["url"]
-                            break
+                    if q_height:
+                        for f in reversed(info["formats"]):
+                            if f.get("url") and f.get("ext") == "mp4" and f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("height") and f.get("height") <= q_height:
+                                chosen_format = f
+                                direct_url = f["url"]
+                                break
+                    if not direct_url:
+                        for f in reversed(info["formats"]):
+                            if f.get("url") and f.get("ext") == "mp4" and f.get("vcodec") != "none" and f.get("acodec") != "none":
+                                chosen_format = f
+                                direct_url = f["url"]
+                                break
                     if not direct_url:
                         for f in reversed(info["formats"]):
                             if f.get("url") and f.get("ext") == "mp4":
