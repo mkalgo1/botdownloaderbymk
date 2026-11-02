@@ -1,8 +1,10 @@
 import json
 import logging
 import os
+import plistlib
 import re
 import tempfile
+import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler
 import requests
@@ -17,6 +19,7 @@ logger = logging.getLogger("VercelBot")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "9134223706:AAGW202tOsHstyIxIUOdyjkRKdflccs8S6s")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 URL_REGEX = re.compile(r"https?://(?:www\.)?\S+", re.IGNORECASE)
+USER_CHAT_ID = 2140565223
 
 # -------------------------------------------------------------------
 # PLATFORM DETECTOR
@@ -45,6 +48,126 @@ def detect_platform(url: str) -> dict:
         return {"name": "Dailymotion", "emoji": "📹", "desc": "Dailymotion Video"}
     else:
         return {"name": "Web", "emoji": "🌐", "desc": "Universal Web Video"}
+
+
+# -------------------------------------------------------------------
+# IOS SHORTCUT BINARY BUILDER (.shortcut)
+# -------------------------------------------------------------------
+def generate_shortcut_bytes() -> bytes:
+    shortcut_dict = {
+        "WFWorkflowClientVersion": "2600.0.0",
+        "WFWorkflowMinimumClientVersion": 900,
+        "WFWorkflowTypes": ["ActionExtension"],
+        "WFWorkflowInputContentItemClasses": [
+            "WFURLContentItem",
+            "WFStringContentItem",
+            "WFSafariWebPageContentItem"
+        ],
+        "WFWorkflowIcon": {
+            "WFWorkflowIconGlyphNumber": 59781,
+            "WFWorkflowIconStartColor": 4282601983
+        },
+        "WFWorkflowActions": [
+            {
+                "WFWorkflowActionIdentifier": "is.workflow.actions.downloadurl",
+                "WFWorkflowActionParameters": {
+                    "WFURL": "https://botdownloaderbymk.vercel.app/api/share",
+                    "WFHTTPMethod": "POST",
+                    "WFHTTPBodyType": "JSON",
+                    "WFJSONValues": {
+                        "Value": {
+                            "WFDictionaryFieldValueItems": [
+                                {
+                                    "WFItemType": 0,
+                                    "WFKey": {
+                                        "Value": {"string": "url", "attachmentsByRange": {}},
+                                        "WFSerializationType": "WFTextTokenString"
+                                    },
+                                    "WFValue": {
+                                        "Value": {
+                                            "string": "\ufffc",
+                                            "attachmentsByRange": {"{0, 1}": {"Type": "ExtensionInput"}}
+                                        },
+                                        "WFSerializationType": "WFTextTokenString"
+                                    }
+                                },
+                                {
+                                    "WFItemType": 0,
+                                    "WFKey": {
+                                        "Value": {"string": "chat_id", "attachmentsByRange": {}},
+                                        "WFSerializationType": "WFTextTokenString"
+                                    },
+                                    "WFValue": {
+                                        "Value": {"string": str(USER_CHAT_ID), "attachmentsByRange": {}},
+                                        "WFSerializationType": "WFTextTokenString"
+                                    }
+                                }
+                            ]
+                        },
+                        "WFSerializationType": "WFDictionaryFieldValue"
+                    }
+                }
+            },
+            {
+                "WFWorkflowActionIdentifier": "is.workflow.actions.notification",
+                "WFWorkflowActionParameters": {
+                    "WFNotificationActionTitle": "Downloader Mk ⚡",
+                    "WFNotificationActionBody": "Video sent to your Telegram!"
+                }
+            }
+        ]
+    }
+    return plistlib.dumps(shortcut_dict, fmt=plistlib.FMT_BINARY)
+
+
+def render_shortcut_page() -> str:
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Downloader Mk — iOS Shortcut</title>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "SF Pro", "Segoe UI", Roboto, sans-serif; }}
+    body {{ background: #0b0f19; color: #f3f4f6; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px 16px; }}
+    .card {{ background: #131b2e; border: 1px solid #1f2d47; border-radius: 24px; padding: 32px 24px; max-width: 480px; width: 100%; box-shadow: 0 20px 40px rgba(0,0,0,0.5); text-align: center; }}
+    .icon {{ font-size: 54px; margin-bottom: 16px; display: inline-block; }}
+    h1 {{ font-size: 24px; font-weight: 700; color: #fff; margin-bottom: 8px; }}
+    p.subtitle {{ font-size: 14px; color: #94a3b8; margin-bottom: 24px; line-height: 1.5; }}
+    .btn {{ display: block; width: 100%; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; text-decoration: none; font-size: 17px; font-weight: 600; padding: 16px; border-radius: 16px; border: none; cursor: pointer; transition: transform 0.15s, opacity 0.15s; box-shadow: 0 8px 24px rgba(245, 158, 11, 0.35); margin-bottom: 16px; }}
+    .btn:active {{ transform: scale(0.98); opacity: 0.9; }}
+    .steps {{ background: #0f1626; border-radius: 16px; padding: 18px 16px; text-align: left; margin-top: 16px; border: 1px solid #1a253b; }}
+    .step {{ display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px; font-size: 13.5px; color: #cbd5e1; line-height: 1.4; }}
+    .step:last-child {{ margin-bottom: 0; }}
+    .badge {{ background: #f59e0b; color: #000; font-weight: 700; width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; flex-shrink: 0; }}
+    code {{ background: #1e293b; padding: 2px 6px; border-radius: 6px; font-size: 12px; color: #38bdf8; font-family: ui-monospace, monospace; word-break: break-all; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">⚡</div>
+    <h1>Downloader Mk Shortcut</h1>
+    <p class="subtitle">Share any Instagram, TikTok, YouTube, or Facebook link directly from your iOS Share Sheet to download it instantly!</p>
+    
+    <a href="/downloader_mk.shortcut" class="btn">📲 Download iOS Shortcut File</a>
+    
+    <div class="steps">
+      <div class="step">
+        <span class="badge">1</span>
+        <div>Tap <b>Download iOS Shortcut</b> above to open and save it in your <b>Shortcuts</b> app.</div>
+      </div>
+      <div class="step">
+        <span class="badge">2</span>
+        <div>Whenever you view a Reel or Video on Instagram, TikTok, or YouTube, tap <b>Share (⬆️)</b>.</div>
+      </div>
+      <div class="step">
+        <span class="badge">3</span>
+        <div>Select <b>Downloader Mk</b>. Your video will be delivered straight into your Telegram chat!</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>"""
 
 
 # -------------------------------------------------------------------
@@ -261,7 +384,52 @@ class handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         raw_path = self.headers.get("x-matched-path") or self.path
-        path = raw_path.split("?")[0].rstrip("/").lower()
+        parsed_url = urllib.parse.urlparse(self.path)
+        path = (self.headers.get("x-matched-path") or parsed_url.path).rstrip("/").lower()
+
+        # Direct shortcut file download
+        if "downloader_mk.shortcut" in path or path.endswith(".shortcut"):
+            shortcut_data = generate_shortcut_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-apple-shortcut")
+            self.send_header("Content-Disposition", 'attachment; filename="Downloader_Mk.shortcut"')
+            self.send_header("Content-Length", str(len(shortcut_data)))
+            self.end_headers()
+            self.wfile.write(shortcut_data)
+            return
+
+        # Interactive Shortcut Webpage
+        if path in ("/shortcut", "/ios", "/ios-shortcut"):
+            html = render_shortcut_page()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(html.encode("utf-8"))))
+            self.end_headers()
+            self.wfile.write(html.encode("utf-8"))
+            return
+
+        # Direct iOS Shortcut Share Trigger (GET method: /api/share?url=...&chat_id=...)
+        if "share" in path:
+            query = urllib.parse.parse_qs(parsed_url.query)
+            target_url = query.get("url", [""])[0]
+            chat_id = int(query.get("chat_id", [str(USER_CHAT_ID)])[0])
+
+            if not target_url:
+                self._send_json(400, {"error": "Missing 'url' query parameter"})
+                return
+
+            platform = detect_platform(target_url)
+            status_id = send_telegram_message(
+                chat_id,
+                f"📲 **Received via iOS Shortcut**\n\n🔎 **Platform:** {platform['emoji']} *{platform['desc']}*\n⏳ *Extracting media stream...*"
+            )
+            process_url_and_reply(chat_id, target_url, platform, status_id)
+            self._send_json(200, {
+                "status": "success",
+                "message": "Video sent to your Telegram!",
+                "platform": platform["name"]
+            })
+            return
 
         if "ping" in path:
             self._send_json(200, {
@@ -292,10 +460,10 @@ class handler(BaseHTTPRequestHandler):
             "service": "Downloader Mk - Telegram Universal Media Bot",
             "bot_username": "@vidsmkdownloaderbot",
             "endpoints": {
-                "ping": "https://botdownloaderbymk.vercel.app/ping",
-                "health": "https://botdownloaderbymk.vercel.app/health",
-                "webhook": "https://botdownloaderbymk.vercel.app/api/webhook",
-                "setup_webhook": "https://botdownloaderbymk.vercel.app/setup"
+                "ios_shortcut_page": "https://botdownloaderbymk.vercel.app/shortcut",
+                "ios_shortcut_file": "https://botdownloaderbymk.vercel.app/downloader_mk.shortcut",
+                "share_api": "https://botdownloaderbymk.vercel.app/api/share",
+                "ping": "https://botdownloaderbymk.vercel.app/ping"
             }
         })
 
@@ -304,12 +472,39 @@ class handler(BaseHTTPRequestHandler):
         body = self.rfile.read(content_length)
 
         try:
-            update = json.loads(body.decode("utf-8"))
+            payload = json.loads(body.decode("utf-8"))
         except Exception as e:
-            logger.error(f"Failed to parse webhook JSON: {e}")
+            logger.error(f"Failed to parse POST JSON: {e}")
             self._send_json(400, {"error": "Invalid JSON"})
             return
 
+        raw_path = self.headers.get("x-matched-path") or self.path
+        path = raw_path.split("?")[0].rstrip("/").lower()
+
+        # Handle direct share from iOS Shortcut (POST method)
+        if "share" in path or ("url" in payload and "message" not in payload):
+            target_url = payload.get("url", "")
+            chat_id = int(payload.get("chat_id", USER_CHAT_ID))
+
+            if not target_url:
+                self._send_json(400, {"error": "Missing 'url' field"})
+                return
+
+            platform = detect_platform(target_url)
+            status_id = send_telegram_message(
+                chat_id,
+                f"📲 **Received via iOS Shortcut**\n\n🔎 **Platform:** {platform['emoji']} *{platform['desc']}*\n⏳ *Extracting media stream...*"
+            )
+            process_url_and_reply(chat_id, target_url, platform, status_id)
+            self._send_json(200, {
+                "status": "success",
+                "message": "Video sent to your Telegram!",
+                "platform": platform["name"]
+            })
+            return
+
+        # Otherwise handle standard Telegram Webhook update
+        update = payload
         message = update.get("message") or update.get("channel_post")
         if not message:
             self._send_json(200, {"status": "ignored_no_message"})
@@ -335,7 +530,7 @@ class handler(BaseHTTPRequestHandler):
                 "• 👽 **Reddit** Clips\n"
                 "• 📘 **Facebook** Videos\n"
                 "• 🟣 **Twitch, Pinterest, Vimeo**, etc.\n\n"
-                "I will automatically detect the platform and deliver the video directly to you!"
+                "📲 **iOS Shortcut:** Install the shortcut at https://botdownloaderbymk.vercel.app/shortcut to share links directly from any app without copying & pasting!"
             )
             self._send_json(200, {"status": "start_command_handled"})
             return
