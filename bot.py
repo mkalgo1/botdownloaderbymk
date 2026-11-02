@@ -48,13 +48,44 @@ DOWNLOAD_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
 
 # -------------------------------------------------------------------
+# PLATFORM DETECTOR
+# -------------------------------------------------------------------
+def detect_platform(url: str) -> dict:
+    url_l = url.lower()
+    if "instagram.com" in url_l:
+        return {"name": "Instagram", "emoji": "📸", "desc": "Instagram Reel / Post"}
+    elif "tiktok.com" in url_l:
+        return {"name": "TikTok", "emoji": "🎵", "desc": "TikTok Video"}
+    elif "youtube.com" in url_l or "youtu.be" in url_l:
+        return {"name": "YouTube", "emoji": "🔴", "desc": "YouTube Video / Shorts"}
+    elif "twitter.com" in url_l or "x.com" in url_l:
+        return {"name": "X (Twitter)", "emoji": "🐦", "desc": "X / Twitter Video"}
+    elif "reddit.com" in url_l or "redd.it" in url_l:
+        return {"name": "Reddit", "emoji": "👽", "desc": "Reddit Video"}
+    elif "facebook.com" in url_l or "fb.watch" in url_l:
+        return {"name": "Facebook", "emoji": "📘", "desc": "Facebook Video"}
+    elif "twitch.tv" in url_l:
+        return {"name": "Twitch", "emoji": "🟣", "desc": "Twitch Clip"}
+    elif "pinterest.com" in url_l or "pin.it" in url_l:
+        return {"name": "Pinterest", "emoji": "📌", "desc": "Pinterest Video"}
+    elif "vimeo.com" in url_l:
+        return {"name": "Vimeo", "emoji": "🎬", "desc": "Vimeo Video"}
+    elif "dailymotion.com" in url_l or "dai.ly" in url_l:
+        return {"name": "Dailymotion", "emoji": "📹", "desc": "Dailymotion Video"}
+    else:
+        return {"name": "Web", "emoji": "🌐", "desc": "Universal Web Video"}
+
+
+# -------------------------------------------------------------------
 # KEEP-ALIVE HTTP SERVER (PREVENTS BOT SLEEP ON RENDER/KOYEB/ETC)
 # -------------------------------------------------------------------
 async def ping_handler(request: web.Request) -> web.Response:
     return web.json_response({
         "status": "pong",
         "message": "Bot is awake and running 24/7",
-        "service": "Universal Media Downloader Bot"
+        "service": "Universal Media Downloader Bot",
+        "bot": "@vidsmkdownloaderbot",
+        "ping_url": "https://botdownloaderbymk.vercel.app/ping"
     })
 
 async def health_handler(request: web.Request) -> web.Response:
@@ -93,8 +124,7 @@ async def self_ping_worker():
     """Optional auto-ping background loop if PING_URL or RENDER_EXTERNAL_URL is set."""
     target_url = os.getenv("PING_URL") or os.getenv("RENDER_EXTERNAL_URL")
     if not target_url:
-        logger.info("PING_URL not set. Use external monitor (e.g., UptimeRobot) pointing to your /ping endpoint.")
-        return
+        target_url = "https://botdownloaderbymk.vercel.app/ping"
 
     if not target_url.endswith("/ping"):
         target_url = target_url.rstrip("/") + "/ping"
@@ -108,7 +138,7 @@ async def self_ping_worker():
                     logger.info(f"Keep-alive self-ping sent -> Status: {resp.status}")
             except Exception as e:
                 logger.warning(f"Self-ping failed (non-critical): {e}")
-            await asyncio.sleep(10 * 60)  # Ping every 10 minutes (prevents 15m idle shutdown)
+            await asyncio.sleep(10 * 60)  # Ping every 10 minutes
 
 
 # -------------------------------------------------------------------
@@ -146,7 +176,6 @@ def run_adaptive_compression(input_path: str, output_path: str, duration: float)
     calculated_video_kbit = int((usable_video_bits / duration) / 1000)
     video_kbit = max(180, min(calculated_video_kbit, 2600))
 
-    # Adaptive scaling based on bitrate density
     scale_expr = "scale='min(1280,iw)':-2"
     if video_kbit < 600:
         scale_expr = "scale='min(854,iw)':-2"
@@ -187,6 +216,11 @@ def download_and_process_sync(url: str, working_dir: str) -> Tuple[Optional[str]
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-us,en;q=0.5",
+        },
         "postprocessors": [
             {
                 "key": "FFmpegVideoConvertor",
@@ -213,11 +247,9 @@ def download_and_process_sync(url: str, working_dir: str) -> Tuple[Optional[str]
     raw_path = mp4_files[0] if mp4_files else downloaded[0]
     raw_size = os.path.getsize(raw_path)
 
-    # Return if under Telegram limit
     if raw_size <= MAX_TELEGRAM_BYTES:
         return raw_path, info
 
-    # Trigger compression for files > 48 MB
     dur = float(info.get("duration") or get_media_duration(raw_path))
     if dur > MAX_VIDEO_DURATION_SECONDS:
         raise ValueError(f"Video duration ({int(dur // 60)}m) exceeds max allowed limit (60m).")
@@ -239,9 +271,14 @@ async def cmd_start(msg: Message):
     await msg.reply(
         "⚡ **Universal Video Downloader**\n\n"
         "Send or paste any public video link from:\n"
-        "• **Shorts / Reels:** TikTok, Instagram, YouTube Shorts, X/Twitter, Reddit\n"
-        "• **Full Videos:** YouTube, Twitch, Facebook, Vimeo, Dailymotion, etc.\n\n"
-        "Files exceeding 48 MB are automatically optimized for instant in-app playback."
+        "• 📸 **Instagram** (Reels, Posts, Stories)\n"
+        "• 🎵 **TikTok** (No watermark)\n"
+        "• 🔴 **YouTube** (Shorts & Standard Videos)\n"
+        "• 🐦 **X / Twitter** Media\n"
+        "• 👽 **Reddit** Clips\n"
+        "• 📘 **Facebook** Videos\n"
+        "• 🟣 **Twitch, Pinterest, Vimeo**, etc.\n\n"
+        "I will detect the platform automatically and optimize the video for instant playback!"
     )
 
 
@@ -252,17 +289,22 @@ async def process_link(msg: Message):
         return
 
     url = match.group(0)
-    status_msg = await msg.reply("🔎 Analyzing media stream...")
+    platform = detect_platform(url)
+
+    status_msg = await msg.reply(
+        f"🔎 **Platform Detected:** {platform['emoji']} *{platform['desc']}*\n"
+        f"⏳ Analyzing media stream..."
+    )
 
     async with DOWNLOAD_SEMAPHORE:
         temp_dir = tempfile.mkdtemp(prefix="worker_media_")
 
         try:
-            await status_msg.edit_text("📥 Downloading & checking file size...")
+            await status_msg.edit_text(f"📥 Downloading {platform['emoji']} {platform['name']} stream & checking size...")
             final_path, info = await asyncio.to_thread(download_and_process_sync, url, temp_dir)
 
             if not final_path or not os.path.exists(final_path):
-                await status_msg.edit_text("❌ Could not download video. The link may be private or invalid.")
+                await status_msg.edit_text(f"❌ Could not download video from {platform['name']}. The link may be private or invalid.")
                 return
 
             size = os.path.getsize(final_path)
@@ -272,9 +314,9 @@ async def process_link(msg: Message):
                 )
                 return
 
-            await status_msg.edit_text("🚀 Uploading media to Telegram...")
+            await status_msg.edit_text(f"🚀 Uploading {platform['name']} media to Telegram...")
 
-            title = info.get("title", "Video")
+            title = info.get("title", f"{platform['name']} Video")
             duration = int(info.get("duration", 0)) if info.get("duration") else None
             width = info.get("width")
             height = info.get("height")
@@ -283,7 +325,7 @@ async def process_link(msg: Message):
 
             await msg.reply_video(
                 video=payload,
-                caption=f"🎬 **{title[:80]}**",
+                caption=f"🎬 **{platform['emoji']} {platform['name']}**\n\n📌 {title[:80]}",
                 duration=duration,
                 width=width,
                 height=height,
@@ -309,14 +351,9 @@ async def process_link(msg: Message):
 # -------------------------------------------------------------------
 async def main():
     logger.info("Initializing bot worker and ping server...")
-    
-    # 1. Start Keep-Alive Web Server (for ping / awake status)
     web_runner = await start_web_server()
-    
-    # 2. Start Self-Ping Task in background if configured
     asyncio.create_task(self_ping_worker())
     
-    # 3. Start Telegram Bot Polling
     logger.info("Starting Telegram long polling...")
     await bot.delete_webhook(drop_pending_updates=True)
     try:
