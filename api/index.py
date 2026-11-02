@@ -50,14 +50,21 @@ def detect_platform(url: str) -> dict:
 # -------------------------------------------------------------------
 # TELEGRAM API HELPERS
 # -------------------------------------------------------------------
-def send_telegram_message(chat_id: int, text: str, parse_mode: str = "Markdown") -> int:
+def send_telegram_message(chat_id: int, text: str) -> int:
     try:
         res = requests.post(
             f"{TELEGRAM_API}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": parse_mode},
+            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
             timeout=10
         )
         data = res.json()
+        if not data.get("ok"):
+            res = requests.post(
+                f"{TELEGRAM_API}/sendMessage",
+                json={"chat_id": chat_id, "text": text},
+                timeout=10
+            )
+            data = res.json()
         if data.get("ok"):
             return data["result"]["message_id"]
     except Exception as e:
@@ -65,15 +72,21 @@ def send_telegram_message(chat_id: int, text: str, parse_mode: str = "Markdown")
     return 0
 
 
-def edit_telegram_message(chat_id: int, message_id: int, text: str, parse_mode: str = "Markdown"):
+def edit_telegram_message(chat_id: int, message_id: int, text: str):
     if not message_id:
         return
     try:
-        requests.post(
+        res = requests.post(
             f"{TELEGRAM_API}/editMessageText",
-            json={"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": parse_mode},
+            json={"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "Markdown"},
             timeout=10
         )
+        if not res.json().get("ok"):
+            requests.post(
+                f"{TELEGRAM_API}/editMessageText",
+                json={"chat_id": chat_id, "message_id": message_id, "text": text},
+                timeout=10
+            )
     except Exception as e:
         logger.error(f"editMessageText error: {e}")
 
@@ -95,15 +108,18 @@ def delete_telegram_message(chat_id: int, message_id: int):
 # EXTRACTION & UPLOAD PIPELINE
 # -------------------------------------------------------------------
 def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id: int):
+    logger.info(f"Processing URL: {url} for {platform['name']} (chat_id: {chat_id})")
+
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
-        "format": "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best",
+        "format": "best[ext=mp4][acodec!=none]/best[ext=mp4]/best",
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-us,en;q=0.5",
+            "Referer": url,
         }
     }
 
@@ -113,104 +129,113 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
             if "entries" in info and info["entries"]:
                 info = info["entries"][0]
 
-        title = info.get("title", f"{platform['name']} Video")
+        title = str(info.get("title", f"{platform['name']} Video")).strip()
         duration = int(info.get("duration", 0)) if info.get("duration") else None
-        caption = f"🎬 **{platform['emoji']} {platform['name']}**\n\n📌 {title[:80]}"
 
-        # Attempt 1: Direct streaming URL if available
+        # Resolve direct video stream URL
         direct_url = info.get("url")
         if not direct_url and "formats" in info:
-            mp4_candidates = [
-                f for f in info["formats"]
-                if f.get("ext") == "mp4" and f.get("url") and f.get("vcodec") != "none"
-            ]
-            if mp4_candidates:
-                direct_url = mp4_candidates[-1]["url"]
-
-        if direct_url:
-            logger.info("Attempting direct URL dispatch via Telegram Bot API...")
-            send_res = requests.post(
-                f"{TELEGRAM_API}/sendVideo",
-                json={
-                    "chat_id": chat_id,
-                    "video": direct_url,
-                    "caption": caption,
-                    "parse_mode": "Markdown",
-                    "supports_streaming": True,
-                    "duration": duration
-                },
-                timeout=25
-            )
-            result = send_res.json()
-            if result.get("ok"):
-                delete_telegram_message(chat_id, status_msg_id)
-                return
-
-        # Attempt 2: Download stream chunk to /tmp and upload multipart
-        edit_telegram_message(
-            chat_id,
-            status_msg_id,
-            f"📥 **Downloading {platform['emoji']} {platform['name']} stream...**"
-        )
-
-        tmp_dir = tempfile.gettempdir()
-        tmp_file = os.path.join(tmp_dir, f"video_{uuid.uuid4().hex[:6]}.mp4")
-
-        ydl_download_opts = {
-            "outtmpl": tmp_file,
-            "format": "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio/best",
-            "noplaylist": True,
-            "quiet": True,
-            "no_warnings": True,
-            "max_filesize": 48 * 1024 * 1024,
-        }
-
-        with yt_dlp.YoutubeDL(ydl_download_opts) as ydl:
-            ydl.download([url])
-
-        target_file = tmp_file
-        if not os.path.exists(target_file):
-            for candidate in os.listdir(tmp_dir):
-                if candidate.startswith("video_") and candidate.endswith(".mp4"):
-                    target_file = os.path.join(tmp_dir, candidate)
+            for f in reversed(info["formats"]):
+                if f.get("url") and f.get("ext") == "mp4":
+                    direct_url = f["url"]
                     break
 
-        if os.path.exists(target_file):
-            edit_telegram_message(chat_id, status_msg_id, "🚀 **Uploading video to Telegram...**")
-            with open(target_file, "rb") as vf:
-                requests.post(
-                    f"{TELEGRAM_API}/sendVideo",
-                    data={
-                        "chat_id": chat_id,
-                        "caption": caption,
-                        "parse_mode": "Markdown",
-                        "supports_streaming": "true"
-                    },
-                    files={"video": (os.path.basename(target_file), vf, "video/mp4")},
-                    timeout=50
-                )
-            try:
-                os.remove(target_file)
-            except Exception:
-                pass
-            delete_telegram_message(chat_id, status_msg_id)
+        if not direct_url:
+            edit_telegram_message(
+                chat_id,
+                status_msg_id,
+                f"❌ Could not extract video stream from {platform['name']}. Media may be private or protected."
+            )
             return
 
+        # 2. Download direct stream into temporary file
         edit_telegram_message(
             chat_id,
             status_msg_id,
-            f"❌ Could not download video from {platform['name']}. File might be private or geo-blocked."
+            f"📥 **Downloading {platform['emoji']} {platform['name']} media...**"
         )
+
+        tmp_file = os.path.join(tempfile.gettempdir(), f"vid_{uuid.uuid4().hex[:6]}.mp4")
+        stream_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": url
+        }
+
+        download_resp = requests.get(direct_url, headers=stream_headers, stream=True, timeout=25)
+        download_resp.raise_for_status()
+
+        total_bytes = 0
+        with open(tmp_file, "wb") as f:
+            for chunk in download_resp.iter_content(chunk_size=1024 * 256):
+                if chunk:
+                    f.write(chunk)
+                    total_bytes += len(chunk)
+                    if total_bytes > 48 * 1024 * 1024:
+                        break
+
+        if total_bytes > 48 * 1024 * 1024:
+            if os.path.exists(tmp_file):
+                os.remove(tmp_file)
+            edit_telegram_message(
+                chat_id,
+                status_msg_id,
+                f"⚠️ Video size ({total_bytes // (1024 * 1024)} MB) exceeds Telegram's 50 MB upload limit."
+            )
+            return
+
+        if not os.path.exists(tmp_file) or total_bytes == 0:
+            edit_telegram_message(
+                chat_id,
+                status_msg_id,
+                f"❌ Downloaded stream was empty or blocked by {platform['name']}."
+            )
+            return
+
+        # 3. Upload video file to Telegram
+        edit_telegram_message(
+            chat_id,
+            status_msg_id,
+            f"🚀 **Uploading {platform['name']} video to chat...**"
+        )
+
+        caption_text = f"🎬 {platform['emoji']} {platform['name']}\n\n📌 {title[:80]}"
+
+        with open(tmp_file, "rb") as vf:
+            upload_res = requests.post(
+                f"{TELEGRAM_API}/sendVideo",
+                data={
+                    "chat_id": chat_id,
+                    "caption": caption_text,
+                    "supports_streaming": "true",
+                    "duration": duration
+                },
+                files={"video": (os.path.basename(tmp_file), vf, "video/mp4")},
+                timeout=50
+            )
+
+        try:
+            os.remove(tmp_file)
+        except Exception:
+            pass
+
+        upload_data = upload_res.json()
+        logger.info(f"Telegram upload result: {upload_data.get('ok')} - desc: {upload_data.get('description')}")
+
+        if upload_data.get("ok"):
+            delete_telegram_message(chat_id, status_msg_id)
+        else:
+            err_desc = upload_data.get("description", "Unknown Telegram error")
+            edit_telegram_message(chat_id, status_msg_id, f"❌ Telegram upload error: {err_desc}")
 
     except yt_dlp.utils.DownloadError as de:
         clean_err = str(de).split(";")[0].replace("ERROR:", "").strip()
         edit_telegram_message(chat_id, status_msg_id, f"❌ Extraction error: {clean_err[:120]}")
     except Exception as e:
-        logger.error(f"Error handling video: {e}")
+        logger.error(f"Error handling video: {e}", exc_info=True)
         edit_telegram_message(
             chat_id,
             status_msg_id,
-            "❌ An unexpected error occurred while processing the video."
+            f"❌ Error downloading video: {str(e)[:100]}"
         )
 
 
@@ -262,7 +287,6 @@ class handler(BaseHTTPRequestHandler):
             })
             return
 
-        # Default info endpoint
         self._send_json(200, {
             "status": "online",
             "service": "Downloader Mk - Telegram Universal Media Bot",
