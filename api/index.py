@@ -51,6 +51,26 @@ def detect_platform(url: str) -> dict:
 
 
 # -------------------------------------------------------------------
+# SPECIALIZED FAST EXTRACTORS (TikTok No-Watermark)
+# -------------------------------------------------------------------
+def extract_tiktok_direct(url: str):
+    try:
+        api_url = f"https://tikwm.com/api/?url={urllib.parse.quote(url, safe=':/?=&')}"
+        req = requests.get(api_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}, timeout=10)
+        if req.status_code == 200:
+            data = req.json()
+            if data.get("code") == 0 and data.get("data"):
+                d = data["data"]
+                play_url = d.get("play") or d.get("wmplay")
+                title = d.get("title") or "TikTok Video"
+                duration = d.get("duration", 0)
+                return play_url, title, duration
+    except Exception as e:
+        logger.warning(f"TikWM extraction failed: {e}")
+    return None, None, None
+
+
+# -------------------------------------------------------------------
 # IOS SHORTCUT BINARY BUILDER (.shortcut)
 # -------------------------------------------------------------------
 def generate_shortcut_bytes() -> bytes:
@@ -131,41 +151,61 @@ def render_shortcut_page() -> str:
     * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "SF Pro", "Segoe UI", Roboto, sans-serif; }}
     body {{ background: #0b0f19; color: #f3f4f6; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px 16px; }}
     .card {{ background: #131b2e; border: 1px solid #1f2d47; border-radius: 24px; padding: 32px 24px; max-width: 480px; width: 100%; box-shadow: 0 20px 40px rgba(0,0,0,0.5); text-align: center; }}
-    .icon {{ font-size: 54px; margin-bottom: 16px; display: inline-block; }}
+    .icon {{ font-size: 54px; margin-bottom: 14px; display: inline-block; }}
     h1 {{ font-size: 24px; font-weight: 700; color: #fff; margin-bottom: 8px; }}
-    p.subtitle {{ font-size: 14px; color: #94a3b8; margin-bottom: 24px; line-height: 1.5; }}
-    .btn {{ display: block; width: 100%; background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff; text-decoration: none; font-size: 17px; font-weight: 600; padding: 16px; border-radius: 16px; border: none; cursor: pointer; transition: transform 0.15s, opacity 0.15s; box-shadow: 0 8px 24px rgba(245, 158, 11, 0.35); margin-bottom: 16px; }}
+    p.subtitle {{ font-size: 14px; color: #94a3b8; margin-bottom: 20px; line-height: 1.5; }}
+    .copy-box {{ background: #0b1120; border: 1px dashed #3b82f6; border-radius: 14px; padding: 14px; margin-bottom: 20px; text-align: left; }}
+    .copy-label {{ font-size: 11px; text-transform: uppercase; color: #60a5fa; font-weight: 700; letter-spacing: 0.5px; margin-bottom: 6px; }}
+    .copy-url {{ font-family: ui-monospace, monospace; font-size: 12px; color: #38bdf8; word-break: break-all; margin-bottom: 10px; display: block; }}
+    .btn {{ display: block; width: 100%; background: linear-gradient(135deg, #2563eb, #1d4ed8); color: #fff; text-decoration: none; font-size: 16px; font-weight: 600; padding: 14px; border-radius: 14px; border: none; cursor: pointer; transition: transform 0.15s, opacity 0.15s; box-shadow: 0 8px 20px rgba(37, 99, 235, 0.35); }}
     .btn:active {{ transform: scale(0.98); opacity: 0.9; }}
-    .steps {{ background: #0f1626; border-radius: 16px; padding: 18px 16px; text-align: left; margin-top: 16px; border: 1px solid #1a253b; }}
-    .step {{ display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px; font-size: 13.5px; color: #cbd5e1; line-height: 1.4; }}
+    .steps {{ background: #0f1626; border-radius: 16px; padding: 18px 16px; text-align: left; margin-top: 20px; border: 1px solid #1a253b; }}
+    .step {{ display: flex; align-items: flex-start; gap: 12px; margin-bottom: 14px; font-size: 13.5px; color: #cbd5e1; line-height: 1.45; }}
     .step:last-child {{ margin-bottom: 0; }}
-    .badge {{ background: #f59e0b; color: #000; font-weight: 700; width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; flex-shrink: 0; }}
+    .badge {{ background: #3b82f6; color: #fff; font-weight: 700; width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; flex-shrink: 0; }}
     code {{ background: #1e293b; padding: 2px 6px; border-radius: 6px; font-size: 12px; color: #38bdf8; font-family: ui-monospace, monospace; word-break: break-all; }}
+    .toast {{ display: none; margin-top: 8px; font-size: 12px; color: #4ade80; font-weight: 600; text-align: center; }}
   </style>
 </head>
 <body>
   <div class="card">
     <div class="icon">⚡</div>
     <h1>Downloader Mk Shortcut</h1>
-    <p class="subtitle">Share any Instagram, TikTok, YouTube, or Facebook link directly from your iOS Share Sheet to download it instantly!</p>
-    
-    <a href="/downloader_mk.shortcut" class="btn">📲 Download iOS Shortcut File</a>
+    <p class="subtitle">iOS requires shortcuts to be added inside the Shortcuts app. Here is your 1-click webhook link ready to paste!</p>
+
+    <div class="copy-box">
+      <div class="copy-label">Your Bot Webhook URL</div>
+      <span class="copy-url" id="webhookUrl">https://botdownloaderbymk.vercel.app/api/share?url=</span>
+      <button class="btn" onclick="copyUrl()">📋 Copy URL for Shortcut</button>
+      <div class="toast" id="toast">✅ Copied to clipboard!</div>
+    </div>
     
     <div class="steps">
       <div class="step">
         <span class="badge">1</span>
-        <div>Tap <b>Download iOS Shortcut</b> above to open and save it in your <b>Shortcuts</b> app.</div>
+        <div>In Apple <b>Shortcuts</b>, tap <b><code>Get Contents of URL 1</code></b> (or tap <b>+</b> to create new).</div>
       </div>
       <div class="step">
         <span class="badge">2</span>
-        <div>Whenever you view a Reel or Video on Instagram, TikTok, or YouTube, tap <b>Share (⬆️)</b>.</div>
+        <div>Tap the <b>( ⓘ )</b> icon at bottom &rarr; turn <b>ON &quot;Show in Share Sheet&quot;</b>.</div>
       </div>
       <div class="step">
         <span class="badge">3</span>
-        <div>Select <b>Downloader Mk</b>. Your video will be delivered straight into your Telegram chat!</div>
+        <div>In the URL box, paste the copied link, and tap after <code>?url=</code> to add <b>Shortcut Input</b>. Tap Done!</div>
       </div>
     </div>
   </div>
+
+  <script>
+    function copyUrl() {{
+      const text = document.getElementById('webhookUrl').innerText;
+      navigator.clipboard.writeText(text).then(() => {{
+        const t = document.getElementById('toast');
+        t.style.display = 'block';
+        setTimeout(() => {{ t.style.display = 'none'; }}, 2500);
+      }});
+    }}
+  </script>
 </body>
 </html>"""
 
@@ -233,35 +273,73 @@ def delete_telegram_message(chat_id: int, message_id: int):
 def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id: int):
     logger.info(f"Processing URL: {url} for {platform['name']} (chat_id: {chat_id})")
 
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "format": "best[ext=mp4][acodec!=none]/best[ext=mp4]/best",
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-us,en;q=0.5",
-            "Referer": url,
-        }
+    direct_url = None
+    title = f"{platform['name']} Video"
+    duration = None
+    stream_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            if "entries" in info and info["entries"]:
-                info = info["entries"][0]
+        # 1. Specialized fast extractor for TikTok (No watermark & avoids 403 CDN blocks)
+        if platform.get("name") == "TikTok":
+            tk_url, tk_title, tk_dur = extract_tiktok_direct(url)
+            if tk_url:
+                direct_url = tk_url
+                if tk_title:
+                    title = tk_title
+                if tk_dur:
+                    duration = int(tk_dur)
+                logger.info(f"TikWM extraction succeeded for TikTok: {direct_url[:80]}")
 
-        title = str(info.get("title", f"{platform['name']} Video")).strip()
-        duration = int(info.get("duration", 0)) if info.get("duration") else None
+        # 2. Universal yt-dlp extractor fallback
+        if not direct_url:
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "noplaylist": True,
+                "format": "best[ext=mp4][acodec!=none]/best[ext=mp4]/best",
+                "http_headers": {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-us,en;q=0.5",
+                }
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if "entries" in info and info["entries"]:
+                    info = info["entries"][0]
 
-        # Resolve direct video stream URL
-        direct_url = info.get("url")
-        if not direct_url and "formats" in info:
-            for f in reversed(info["formats"]):
-                if f.get("url") and f.get("ext") == "mp4":
-                    direct_url = f["url"]
-                    break
+            if info.get("title"):
+                title = str(info["title"]).strip()
+            if info.get("duration"):
+                duration = int(info["duration"])
+
+            chosen_format = None
+            if "formats" in info:
+                for f in reversed(info["formats"]):
+                    if f.get("url") and f.get("ext") == "mp4" and f.get("vcodec") != "none" and f.get("acodec") != "none":
+                        chosen_format = f
+                        direct_url = f["url"]
+                        break
+                if not direct_url:
+                    for f in reversed(info["formats"]):
+                        if f.get("url") and f.get("ext") == "mp4":
+                            chosen_format = f
+                            direct_url = f["url"]
+                            break
+
+            if not direct_url:
+                direct_url = info.get("url")
+
+            if chosen_format and chosen_format.get("http_headers"):
+                stream_headers.update(chosen_format["http_headers"])
+            elif info.get("http_headers"):
+                stream_headers.update(info["http_headers"])
+            elif "instagram.com" in url.lower():
+                stream_headers["Referer"] = "https://www.instagram.com/"
+            elif "tiktok.com" in url.lower():
+                stream_headers["Referer"] = "https://www.tiktok.com/"
 
         if not direct_url:
             edit_telegram_message(
@@ -271,7 +349,7 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
             )
             return
 
-        # 2. Download direct stream into temporary file
+        # 3. Download direct stream into temporary file
         edit_telegram_message(
             chat_id,
             status_msg_id,
@@ -279,12 +357,7 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
         )
 
         tmp_file = os.path.join(tempfile.gettempdir(), f"vid_{uuid.uuid4().hex[:6]}.mp4")
-        stream_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": url
-        }
-
-        download_resp = requests.get(direct_url, headers=stream_headers, stream=True, timeout=25)
+        download_resp = requests.get(direct_url, headers=stream_headers, stream=True, timeout=30)
         download_resp.raise_for_status()
 
         total_bytes = 0
@@ -314,7 +387,7 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
             )
             return
 
-        # 3. Upload video file to Telegram
+        # 4. Upload video file to Telegram
         edit_telegram_message(
             chat_id,
             status_msg_id,
@@ -411,8 +484,11 @@ class handler(BaseHTTPRequestHandler):
 
         # Direct iOS Shortcut Share Trigger (GET method: /api/share?url=...&chat_id=...)
         if action == "share" or "share" in full_path:
-            target_url = query.get("url", [""])[0]
+            raw_url = query.get("url", [""])[0]
             chat_id = int(query.get("chat_id", [str(USER_CHAT_ID)])[0])
+
+            m = URL_REGEX.search(raw_url)
+            target_url = m.group(0) if m else raw_url.strip()
 
             if not target_url:
                 self._send_json(400, {"error": "Missing 'url' query parameter"})
@@ -483,8 +559,11 @@ class handler(BaseHTTPRequestHandler):
 
         # Handle direct share from iOS Shortcut (POST method)
         if "share" in path or ("url" in payload and "message" not in payload):
-            target_url = payload.get("url", "")
+            raw_url = payload.get("url", "")
             chat_id = int(payload.get("chat_id", USER_CHAT_ID))
+
+            m = URL_REGEX.search(raw_url)
+            target_url = m.group(0) if m else raw_url.strip()
 
             if not target_url:
                 self._send_json(400, {"error": "Missing 'url' field"})
