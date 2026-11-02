@@ -482,6 +482,89 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(html.encode("utf-8"))
             return
 
+        # Direct Video Stream for iOS Shortcut (Saves straight to iPhone Camera Roll without Telegram)
+        if action == "stream" or "stream" in full_path or action == "download" or "download" in full_path:
+            raw_url = query.get("url", [""])[0]
+            m = URL_REGEX.search(raw_url)
+            target_url = m.group(0) if m else raw_url.strip()
+
+            if not target_url:
+                self._send_json(400, {"error": "Missing 'url' query parameter"})
+                return
+
+            platform = detect_platform(target_url)
+            direct_url = None
+            stream_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            }
+
+            if platform.get("name") == "TikTok":
+                tk_url, _, _ = extract_tiktok_direct(target_url)
+                if tk_url:
+                    direct_url = tk_url
+
+            if not direct_url:
+                ydl_opts = {
+                    "quiet": True,
+                    "no_warnings": True,
+                    "noplaylist": True,
+                    "format": "best[ext=mp4][acodec!=none]/best[ext=mp4]/best",
+                    "http_headers": {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    }
+                }
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(target_url, download=False)
+                    if "entries" in info and info["entries"]:
+                        info = info["entries"][0]
+
+                chosen_format = None
+                if "formats" in info:
+                    for f in reversed(info["formats"]):
+                        if f.get("url") and f.get("ext") == "mp4" and f.get("vcodec") != "none" and f.get("acodec") != "none":
+                            chosen_format = f
+                            direct_url = f["url"]
+                            break
+                    if not direct_url:
+                        for f in reversed(info["formats"]):
+                            if f.get("url") and f.get("ext") == "mp4":
+                                chosen_format = f
+                                direct_url = f["url"]
+                                break
+                if not direct_url:
+                    direct_url = info.get("url")
+
+                if chosen_format and chosen_format.get("http_headers"):
+                    stream_headers.update(chosen_format["http_headers"])
+                elif info.get("http_headers"):
+                    stream_headers.update(info["http_headers"])
+                elif "instagram.com" in target_url.lower():
+                    stream_headers["Referer"] = "https://www.instagram.com/"
+                elif "tiktok.com" in target_url.lower():
+                    stream_headers["Referer"] = "https://www.tiktok.com/"
+
+            if not direct_url:
+                self._send_json(404, {"error": "Could not extract video stream from URL"})
+                return
+
+            try:
+                stream_resp = requests.get(direct_url, headers=stream_headers, stream=True, timeout=25)
+                stream_resp.raise_for_status()
+                self.send_response(200)
+                self.send_header("Content-Type", "video/mp4")
+                if "content-length" in stream_resp.headers:
+                    self.send_header("Content-Length", stream_resp.headers["content-length"])
+                self.send_header("Content-Disposition", 'attachment; filename="video.mp4"')
+                self.end_headers()
+                for chunk in stream_resp.iter_content(chunk_size=1024 * 128):
+                    if chunk:
+                        self.wfile.write(chunk)
+                return
+            except Exception as e:
+                self._send_json(500, {"error": f"Failed to stream video: {str(e)}"})
+                return
+
         # Direct iOS Shortcut Share Trigger (GET method: /api/share?url=...&chat_id=...)
         if action == "share" or "share" in full_path:
             raw_url = query.get("url", [""])[0]
