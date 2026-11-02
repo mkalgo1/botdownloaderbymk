@@ -371,8 +371,6 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
                 direct_url = snap_u
                 if snap_t:
                     title = snap_t
-                if snap_d:
-                    duration = int(snap_d)
                 logger.info(f"Snapchat direct extraction succeeded: {direct_url[:80]}")
 
         # 2. Universal yt-dlp extractor fallback
@@ -539,6 +537,13 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        try:
+            self._handle_get()
+        except Exception as e:
+            logger.error(f"Unhandled GET exception: {e}", exc_info=True)
+            self._send_json(500, {"error": "Server internal error", "detail": str(e)})
+
+    def _handle_get(self):
         parsed_url = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(parsed_url.query)
         action = query.get("action", [""])[0].lower()
@@ -656,22 +661,24 @@ class handler(BaseHTTPRequestHandler):
                 self._send_json(404, {"error": "Could not extract video stream from URL"})
                 return
 
-            try:
-                stream_resp = requests.get(direct_url, headers=stream_headers, stream=True, timeout=25)
-                stream_resp.raise_for_status()
-                self.send_response(200)
-                self.send_header("Content-Type", "video/mp4")
-                if "content-length" in stream_resp.headers:
-                    self.send_header("Content-Length", stream_resp.headers["content-length"])
-                self.send_header("Content-Disposition", 'attachment; filename="video.mp4"')
-                self.end_headers()
-                for chunk in stream_resp.iter_content(chunk_size=1024 * 128):
-                    if chunk:
-                        self.wfile.write(chunk)
+            # If client requested JSON format
+            if query.get("format", [""])[0].lower() == "json":
+                self._send_json(200, {
+                    "status": "success",
+                    "url": direct_url,
+                    "platform": platform["name"]
+                })
                 return
-            except Exception as e:
-                self._send_json(500, {"error": f"Failed to stream video: {str(e)}"})
-                return
+
+            # Direct 302 Redirect to high-speed CDN URL
+            # Completely avoids Vercel's 4.5MB serverless response payload limit and 10s lambda timeout.
+            # Apple Shortcuts 'Get Contents of URL' follows 302 redirects automatically and saves directly to Photos!
+            self.send_response(302)
+            self.send_header("Location", direct_url)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.end_headers()
+            return
 
         # Direct iOS Shortcut Share Trigger (GET method: /api/share?url=...&chat_id=...)
         if action == "share" or "share" in full_path:
@@ -735,6 +742,13 @@ class handler(BaseHTTPRequestHandler):
         })
 
     def do_POST(self):
+        try:
+            self._handle_post()
+        except Exception as e:
+            logger.error(f"Unhandled POST exception: {e}", exc_info=True)
+            self._send_json(500, {"error": "Server internal error", "detail": str(e)})
+
+    def _handle_post(self):
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length)
 
