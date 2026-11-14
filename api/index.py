@@ -309,6 +309,13 @@ def extract_pinterest_direct(url: str):
 # IOS SHORTCUT BINARY BUILDER (.shortcut)
 # -------------------------------------------------------------------
 def generate_shortcut_bytes() -> bytes:
+    detect_uuid = "2B5480FD-6725-45C6-9EEB-CBE2764B6256"
+    download_uuid = "5F89A507-6BEE-4DCE-9FA4-DF8EC323C625"
+    save_uuid = "9A1D0E44-9BD9-4F5B-9721-BC467DE7BC55"
+
+    url_prefix = "https://botdownloaderbymk.vercel.app/api/stream?url="
+    pos = len(url_prefix)
+
     shortcut_dict = {
         "WFWorkflowClientVersion": "2600.0.0",
         "WFWorkflowMinimumClientVersion": 900,
@@ -316,7 +323,8 @@ def generate_shortcut_bytes() -> bytes:
         "WFWorkflowInputContentItemClasses": [
             "WFURLContentItem",
             "WFStringContentItem",
-            "WFSafariWebPageContentItem"
+            "WFSafariWebPageContentItem",
+            "WFArticleContentItem"
         ],
         "WFWorkflowIcon": {
             "WFWorkflowIconGlyphNumber": 59781,
@@ -324,50 +332,36 @@ def generate_shortcut_bytes() -> bytes:
         },
         "WFWorkflowActions": [
             {
+                "WFWorkflowActionIdentifier": "is.workflow.actions.detect.link",
+                "WFWorkflowActionParameters": {
+                    "UUID": detect_uuid
+                }
+            },
+            {
                 "WFWorkflowActionIdentifier": "is.workflow.actions.downloadurl",
                 "WFWorkflowActionParameters": {
-                    "WFURL": "https://botdownloaderbymk.vercel.app/api/share",
-                    "WFHTTPMethod": "POST",
-                    "WFHTTPBodyType": "JSON",
-                    "WFJSONValues": {
+                    "UUID": download_uuid,
+                    "WFHTTPMethod": "GET",
+                    "WFURL": {
                         "Value": {
-                            "WFDictionaryFieldValueItems": [
-                                {
-                                    "WFItemType": 0,
-                                    "WFKey": {
-                                        "Value": {"string": "url", "attachmentsByRange": {}},
-                                        "WFSerializationType": "WFTextTokenString"
-                                    },
-                                    "WFValue": {
-                                        "Value": {
-                                            "string": "\ufffc",
-                                            "attachmentsByRange": {"{0, 1}": {"Type": "ExtensionInput"}}
-                                        },
-                                        "WFSerializationType": "WFTextTokenString"
-                                    }
-                                },
-                                {
-                                    "WFItemType": 0,
-                                    "WFKey": {
-                                        "Value": {"string": "chat_id", "attachmentsByRange": {}},
-                                        "WFSerializationType": "WFTextTokenString"
-                                    },
-                                    "WFValue": {
-                                        "Value": {"string": str(USER_CHAT_ID), "attachmentsByRange": {}},
-                                        "WFSerializationType": "WFTextTokenString"
-                                    }
+                            "string": f"{url_prefix}\ufffc",
+                            "attachmentsByRange": {
+                                f"{{{pos}, 1}}": {
+                                    "Type": "ActionOutput",
+                                    "OutputUUID": detect_uuid,
+                                    "OutputName": "URLs"
                                 }
-                            ]
+                            }
                         },
-                        "WFSerializationType": "WFDictionaryFieldValue"
+                        "WFSerializationType": "WFTextTokenString"
                     }
                 }
             },
             {
-                "WFWorkflowActionIdentifier": "is.workflow.actions.notification",
+                "WFWorkflowActionIdentifier": "is.workflow.actions.savetocameraroll",
                 "WFWorkflowActionParameters": {
-                    "WFNotificationActionTitle": "Downloader Mk ⚡",
-                    "WFNotificationActionBody": "Video sent to your Telegram!"
+                    "UUID": save_uuid,
+                    "WFCameraRollSelectedGroup": "Recents"
                 }
             }
         ]
@@ -389,10 +383,11 @@ def render_shortcut_page() -> str:
     .icon {{ font-size: 54px; margin-bottom: 14px; display: inline-block; }}
     h1 {{ font-size: 24px; font-weight: 700; color: #fff; margin-bottom: 8px; }}
     p.subtitle {{ font-size: 14px; color: #94a3b8; margin-bottom: 20px; line-height: 1.5; }}
+    .btn-download {{ display: block; width: 100%; background: linear-gradient(135deg, #10b981, #059669); color: #fff; text-decoration: none; font-size: 16px; font-weight: 700; padding: 14px; border-radius: 14px; margin-bottom: 20px; box-shadow: 0 8px 20px rgba(16, 185, 129, 0.35); text-align: center; }}
     .copy-box {{ background: #0b1120; border: 1px dashed #3b82f6; border-radius: 14px; padding: 14px; margin-bottom: 20px; text-align: left; }}
     .copy-label {{ font-size: 11px; text-transform: uppercase; color: #60a5fa; font-weight: 700; letter-spacing: 0.5px; margin-bottom: 6px; }}
     .copy-url {{ font-family: ui-monospace, monospace; font-size: 12px; color: #38bdf8; word-break: break-all; margin-bottom: 10px; display: block; }}
-    .btn {{ display: block; width: 100%; background: linear-gradient(135deg, #2563eb, #1d4ed8); color: #fff; text-decoration: none; font-size: 15px; font-weight: 600; padding: 13px; border-radius: 14px; border: none; cursor: pointer; transition: transform 0.15s, opacity 0.15s; box-shadow: 0 8px 20px rgba(37, 99, 235, 0.35); text-align: center; }}
+    .btn {{ display: block; width: 100%; background: linear-gradient(135deg, #2563eb, #1d4ed8); color: #fff; text-decoration: none; font-size: 15px; font-weight: 600; padding: 12px; border-radius: 12px; border: none; cursor: pointer; transition: transform 0.15s, opacity 0.15s; box-shadow: 0 8px 20px rgba(37, 99, 235, 0.35); text-align: center; }}
     .btn:active {{ transform: scale(0.98); opacity: 0.9; }}
     .steps {{ background: #0f1626; border-radius: 16px; padding: 18px 16px; text-align: left; margin-top: 20px; border: 1px solid #1a253b; }}
     .step {{ display: flex; align-items: flex-start; gap: 12px; margin-bottom: 14px; font-size: 13.5px; color: #cbd5e1; line-height: 1.45; }}
@@ -400,6 +395,7 @@ def render_shortcut_page() -> str:
     .badge {{ background: #3b82f6; color: #fff; font-weight: 700; width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; flex-shrink: 0; }}
     code {{ background: #1e293b; padding: 2px 6px; border-radius: 6px; font-size: 12px; color: #38bdf8; font-family: ui-monospace, monospace; word-break: break-all; }}
     .toast {{ display: none; margin-top: 8px; font-size: 12px; color: #4ade80; font-weight: 600; text-align: center; }}
+    .callout {{ background: #1a2333; border-left: 3px solid #f59e0b; padding: 10px 12px; border-radius: 8px; margin-top: 14px; font-size: 12px; color: #fbbf24; text-align: left; line-height: 1.4; }}
   </style>
 </head>
 <body>
@@ -407,6 +403,8 @@ def render_shortcut_page() -> str:
     <div class="icon">⚡</div>
     <h1>Downloader Mk Shortcut</h1>
     <p class="subtitle">Save Pinterest, TikTok, Instagram & more straight into your iPhone Photos app!</p>
+
+    <a href="/downloader_mk.shortcut" class="btn-download">📲 Download Ready Shortcut (.shortcut)</a>
 
     <div class="copy-box">
       <div class="copy-label">Direct Download Stream URL</div>
@@ -418,20 +416,20 @@ def render_shortcut_page() -> str:
     <div class="steps">
       <div class="step">
         <span class="badge">1</span>
-        <div>In Apple <b>Shortcuts</b>, tap <b>+</b> to create a new shortcut. Tap the <b>( ⓘ )</b> at bottom and turn <b>ON &quot;Show in Share Sheet&quot;</b>.</div>
+        <div><b>Option A (Download File):</b> Tap the green button above to download <code>Downloader_Mk.shortcut</code>. In Safari Downloads or Files, tap the file to add it directly to Shortcuts!</div>
       </div>
       <div class="step">
         <span class="badge">2</span>
-        <div>Add action: <b><code>Get URLs from Shortcut Input</code></b> (Crucial for Pinterest/TikTok so the link is cleanly extracted).</div>
+        <div><b>Fix Untrusted / Security Issue:</b> In iPhone <b>Settings &gt; Shortcuts &gt; Advanced</b>, turn ON <b>&quot;Allow Running Scripts&quot;</b> and <b>&quot;Private Sharing&quot;</b>.</div>
       </div>
       <div class="step">
         <span class="badge">3</span>
-        <div>Add action: <b><code>Get Contents of URL</code></b>. Set URL to: <code>https://botdownloaderbymk.vercel.app/api/stream?url=</code> followed by <b><code>[URLs]</code></b>.</div>
+        <div><b>Option B (Update Existing Shortcut):</b> In your Shortcuts app, open your shortcut and ensure action #2 is <b><code>Get URLs from Shortcut Input</code></b>, followed by <b><code>Get Contents of URL</code></b> with the stream URL!</div>
       </div>
-      <div class="step">
-        <span class="badge">4</span>
-        <div>Add action: <b><code>Save to Photo Album</code></b> (saves <code>[Contents of URL]</code> to <b>Recents</b>). Tap Done!</div>
-      </div>
+    </div>
+
+    <div class="callout">
+      💡 <b>Tip:</b> When sharing from Pinterest or TikTok, select <b>Downloader Mk</b> from your Share Sheet to save videos and photos with full sound straight to your Camera Roll.
     </div>
   </div>
 
