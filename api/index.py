@@ -42,7 +42,7 @@ def detect_platform(url: str) -> dict:
     elif "twitch.tv" in url_l:
         return {"name": "Twitch", "emoji": "🟣", "desc": "Twitch Clip"}
     elif "pinterest.com" in url_l or "pin.it" in url_l:
-        return {"name": "Pinterest", "emoji": "📌", "desc": "Pinterest Video"}
+        return {"name": "Pinterest", "emoji": "📌", "desc": "Pinterest Media / Pin"}
     elif "vimeo.com" in url_l:
         return {"name": "Vimeo", "emoji": "🎬", "desc": "Vimeo Video"}
     elif "dailymotion.com" in url_l or "dai.ly" in url_l:
@@ -196,6 +196,88 @@ def extract_tiktok_direct(url: str):
     except Exception as e:
         logger.warning(f"TikWM extraction failed: {e}")
     return None, None, None, None, None
+
+
+def extract_pinterest_direct(url: str):
+    """
+    Extracts direct Pinterest video or high-res photo from PinResource API.
+    Handles pin.it short links, standard pins, idea pins, and video pins cleanly.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "X-Pinterest-PWS-Handler": "www/[username].js"
+    }
+
+    # 1. Expand short links (pin.it/...)
+    expanded_url = url
+    if "pin.it" in url:
+        try:
+            r = requests.get(url, allow_redirects=True, headers=headers, timeout=8)
+            expanded_url = r.url
+        except Exception as e:
+            logger.warning(f"Error expanding pin.it: {e}")
+
+    # 2. Extract Pin ID
+    pin_id_match = re.search(r"pin/(\d+)", expanded_url)
+    if not pin_id_match:
+        pin_id_match = re.search(r"pin/(\d+)", url)
+    if not pin_id_match:
+        return None, None, None, None, None, None, None
+
+    pin_id = pin_id_match.group(1)
+
+    # 3. Query Pinterest PinResource API
+    params = {
+        "source_url": f"/pin/{pin_id}/",
+        "data": json.dumps({
+            "options": {"field_set_key": "unauth_react_main_pin", "id": pin_id},
+            "context": {}
+        })
+    }
+
+    try:
+        resp = requests.get("https://www.pinterest.com/resource/PinResource/get/", headers=headers, params=params, timeout=10)
+        if resp.status_code == 200:
+            pdata = resp.json().get("resource_response", {}).get("data", {})
+            title = pdata.get("grid_title") or pdata.get("title") or pdata.get("closeup_unified_description") or "Pinterest Media"
+            thumb = pdata.get("images", {}).get("orig", {}).get("url")
+
+            # Check for direct video in 'videos'
+            videos = pdata.get("videos")
+            if videos and isinstance(videos, dict):
+                v_list = videos.get("video_list", {})
+                for q in ["V_720P", "V_EXP7", "V_480P", "V_MOBILE"]:
+                    if q in v_list and v_list[q].get("url") and v_list[q]["url"].endswith(".mp4"):
+                        return v_list[q]["url"], "video", title, v_list[q].get("duration", 0), v_list[q].get("width"), v_list[q].get("height"), thumb
+                if "V_HLSV3_MOBILE" in v_list and v_list["V_HLSV3_MOBILE"].get("url"):
+                    vhls = v_list["V_HLSV3_MOBILE"]
+                    return vhls["url"], "video", title, vhls.get("duration", 0), vhls.get("width"), vhls.get("height"), thumb
+
+            # Check story_pin_data for video
+            story = pdata.get("story_pin_data")
+            if story and isinstance(story, dict):
+                for page in story.get("pages", []):
+                    for block in page.get("blocks", []):
+                        if "video" in block:
+                            v_list = block["video"].get("video_list", {})
+                            for q in ["V_720P", "V_EXP7", "V_480P", "V_MOBILE"]:
+                                if q in v_list and v_list[q].get("url") and v_list[q]["url"].endswith(".mp4"):
+                                    return v_list[q]["url"], "video", title, v_list[q].get("duration", 0), v_list[q].get("width"), v_list[q].get("height"), thumb
+                            if "V_HLSV3_MOBILE" in v_list and v_list["V_HLSV3_MOBILE"].get("url"):
+                                vhls = v_list["V_HLSV3_MOBILE"]
+                                return vhls["url"], "video", title, vhls.get("duration", 0), vhls.get("width"), vhls.get("height"), thumb
+
+            # If not a video, extract full resolution original photo
+            images = pdata.get("images", {})
+            if "orig" in images and images["orig"].get("url"):
+                orig = images["orig"]
+                return orig["url"], "image", title, 0, orig.get("width"), orig.get("height"), None
+
+    except Exception as e:
+        logger.warning(f"Pinterest API query error: {e}")
+
+    return None, None, None, None, None, None, None
 
 
 # -------------------------------------------------------------------
@@ -402,7 +484,8 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
     logger.info(f"Processing URL: {url} for {platform['name']} (chat_id: {chat_id})")
 
     direct_url = None
-    title = f"{platform['name']} Video"
+    media_type = "video"
+    title = f"{platform['name']} Media"
     duration = None
     vid_width = None
     vid_height = None
@@ -412,7 +495,7 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
     }
 
     try:
-        # 1. Specialized fast extractors for TikTok & Snapchat
+        # 1. Specialized fast extractors for TikTok, Snapchat & Pinterest
         if platform.get("name") == "TikTok":
             tk_play, tk_hd, tk_title, tk_dur, tk_cov = extract_tiktok_direct(url)
             if tk_play:
@@ -422,6 +505,7 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
                 if tk_dur:
                     duration = int(tk_dur)
                 thumbnail_url = tk_cov
+                media_type = "video"
                 logger.info(f"TikWM extraction succeeded for TikTok: {direct_url[:80]}")
         elif platform.get("name") == "Snapchat":
             snap_u, snap_t, snap_d = extract_snapchat_direct(url)
@@ -429,15 +513,33 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
                 direct_url = snap_u
                 if snap_t:
                     title = snap_t
+                media_type = "video"
                 logger.info(f"Snapchat direct extraction succeeded: {direct_url[:80]}")
+        elif platform.get("name") == "Pinterest":
+            pin_u, pin_mtype, pin_t, pin_d, pin_w, pin_h, pin_th = extract_pinterest_direct(url)
+            if pin_u:
+                direct_url = pin_u
+                media_type = pin_mtype or "video"
+                if pin_t:
+                    title = pin_t
+                if pin_d:
+                    duration = int(pin_d)
+                if pin_w:
+                    vid_width = pin_w
+                if pin_h:
+                    vid_height = pin_h
+                if pin_th:
+                    thumbnail_url = pin_th
+                logger.info(f"Pinterest direct extraction succeeded ({media_type}): {direct_url[:80]}")
 
-        # 2. Universal yt-dlp extractor fallback
+        # 2. Universal yt-dlp extractor fallback (handles all videos AND photos)
         if not direct_url:
             ydl_opts = {
                 "quiet": True,
                 "no_warnings": True,
                 "noplaylist": True,
-                "format": "best[ext=mp4][acodec!=none]/best[ext=mp4]/best",
+                "ignore_no_formats_error": True,
+                "format": "best[ext=mp4][acodec!=none]/best[ext=mp4]/best/bestvideo/bv/b",
                 "http_headers": {
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -446,85 +548,118 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                if "entries" in info and info["entries"]:
+                if info and "entries" in info and info["entries"]:
                     info = info["entries"][0]
 
-            if info.get("title"):
-                title = str(info["title"]).strip()
-            if info.get("duration"):
-                duration = int(info["duration"])
-            if info.get("thumbnail"):
-                thumbnail_url = info.get("thumbnail")
-            if info.get("width"):
-                vid_width = info.get("width")
-            if info.get("height"):
-                vid_height = info.get("height")
+            if info:
+                if info.get("title"):
+                    title = str(info["title"]).strip()
+                if info.get("duration"):
+                    duration = int(info["duration"])
+                if info.get("thumbnail"):
+                    thumbnail_url = info.get("thumbnail")
+                if info.get("width"):
+                    vid_width = info.get("width")
+                if info.get("height"):
+                    vid_height = info.get("height")
 
-            chosen_format = None
-            if "formats" in info:
-                for f in reversed(info["formats"]):
-                    if f.get("url") and f.get("ext") == "mp4" and f.get("vcodec") != "none" and f.get("acodec") != "none":
-                        chosen_format = f
-                        direct_url = f["url"]
-                        break
-                if not direct_url:
+                chosen_format = None
+                if "formats" in info and info["formats"]:
                     for f in reversed(info["formats"]):
-                        if f.get("url") and f.get("ext") == "mp4":
+                        if f.get("url") and f.get("ext") == "mp4" and f.get("vcodec") != "none" and f.get("acodec") != "none":
                             chosen_format = f
                             direct_url = f["url"]
+                            media_type = "video"
                             break
+                    if not direct_url:
+                        for f in reversed(info["formats"]):
+                            if f.get("url") and (f.get("ext") == "mp4" or f.get("vcodec") != "none"):
+                                chosen_format = f
+                                direct_url = f["url"]
+                                media_type = "video"
+                                break
 
-            if not direct_url:
-                direct_url = info.get("url")
+                # If no video format found, inspect thumbnails for photo / image posts (Instagram, Pinterest, X, Reddit)
+                if not direct_url:
+                    if info.get("thumbnails"):
+                        direct_url = info["thumbnails"][-1].get("url")
+                        media_type = "image"
+                    elif info.get("url"):
+                        direct_url = info.get("url")
+                        if any(ext in direct_url.lower() for ext in [".jpg", ".jpeg", ".png", ".webp"]):
+                            media_type = "image"
 
-            if chosen_format and chosen_format.get("http_headers"):
-                stream_headers.update(chosen_format["http_headers"])
-            elif info.get("http_headers"):
-                stream_headers.update(info["http_headers"])
-            elif "instagram.com" in url.lower():
-                stream_headers["Referer"] = "https://www.instagram.com/"
-            elif "tiktok.com" in url.lower():
-                stream_headers["Referer"] = "https://www.tiktok.com/"
+                if chosen_format and chosen_format.get("http_headers"):
+                    stream_headers.update(chosen_format["http_headers"])
+                elif info.get("http_headers"):
+                    stream_headers.update(info["http_headers"])
+                elif "instagram.com" in url.lower():
+                    stream_headers["Referer"] = "https://www.instagram.com/"
+                elif "tiktok.com" in url.lower():
+                    stream_headers["Referer"] = "https://www.tiktok.com/"
+
+        # Double check media_type from URL if still marked video
+        if direct_url and any(ext in direct_url.lower() for ext in [".jpg", ".jpeg", ".png", ".webp"]):
+            media_type = "image"
 
         if not direct_url:
             edit_telegram_message(
                 chat_id,
                 status_msg_id,
-                f"❌ Could not extract video stream from {platform['name']}. Media may be private or protected."
+                f"❌ Could not extract media from {platform['name']}. Post may be private or protected."
             )
             return
 
-        # 3. Download direct stream into temporary file
+        # 3. Download media stream into temporary file
         edit_telegram_message(
             chat_id,
             status_msg_id,
-            f"📥 **Downloading {platform['emoji']} {platform['name']} media...**"
+            f"📥 **Downloading {platform['emoji']} {platform['name']} {media_type}...**"
         )
 
-        tmp_file = os.path.join(tempfile.gettempdir(), f"vid_{uuid.uuid4().hex[:6]}.mp4")
-        download_resp = requests.get(direct_url, headers=stream_headers, stream=True, timeout=30)
-        download_resp.raise_for_status()
-
-        total_bytes = 0
-        with open(tmp_file, "wb") as f:
-            for chunk in download_resp.iter_content(chunk_size=1024 * 256):
-                if chunk:
-                    f.write(chunk)
-                    total_bytes += len(chunk)
-                    if total_bytes > 48 * 1024 * 1024:
+        is_hls = ".m3u8" in direct_url
+        if is_hls and media_type == "video":
+            tmp_file = os.path.join(tempfile.gettempdir(), f"vid_{uuid.uuid4().hex[:6]}.mp4")
+            ydl_hls_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "format": "bestvideo/bv/best",
+                "outtmpl": tmp_file.replace(".mp4", "") + ".%(ext)s"
+            }
+            with yt_dlp.YoutubeDL(ydl_hls_opts) as ydl_hls:
+                ydl_hls.download([direct_url])
+            if not os.path.exists(tmp_file):
+                base = tmp_file.replace(".mp4", "")
+                for ext in [".mp4", ".mkv", ".ts"]:
+                    if os.path.exists(base + ext):
+                        tmp_file = base + ext
                         break
+        else:
+            file_ext = ".jpg" if media_type == "image" else ".mp4"
+            tmp_file = os.path.join(tempfile.gettempdir(), f"media_{uuid.uuid4().hex[:6]}{file_ext}")
+            download_resp = requests.get(direct_url, headers=stream_headers, stream=True, timeout=30)
+            download_resp.raise_for_status()
 
-        if total_bytes > 48 * 1024 * 1024:
-            if os.path.exists(tmp_file):
-                os.remove(tmp_file)
-            edit_telegram_message(
-                chat_id,
-                status_msg_id,
-                f"⚠️ Video size ({total_bytes // (1024 * 1024)} MB) exceeds Telegram's 50 MB upload limit."
-            )
-            return
+            total_bytes = 0
+            with open(tmp_file, "wb") as f:
+                for chunk in download_resp.iter_content(chunk_size=1024 * 256):
+                    if chunk:
+                        f.write(chunk)
+                        total_bytes += len(chunk)
+                        if total_bytes > 48 * 1024 * 1024:
+                            break
 
-        if not os.path.exists(tmp_file) or total_bytes == 0:
+            if total_bytes > 48 * 1024 * 1024:
+                if os.path.exists(tmp_file):
+                    os.remove(tmp_file)
+                edit_telegram_message(
+                    chat_id,
+                    status_msg_id,
+                    f"⚠️ Media size ({total_bytes // (1024 * 1024)} MB) exceeds Telegram's 50 MB upload limit."
+                )
+                return
+
+        if not os.path.exists(tmp_file) or os.path.getsize(tmp_file) == 0:
             edit_telegram_message(
                 chat_id,
                 status_msg_id,
@@ -532,57 +667,66 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
             )
             return
 
-        # Inspect exact native dimensions from MP4 file header (works for any platform!)
-        extracted_w, extracted_h = extract_mp4_dimensions(tmp_file)
-        if extracted_w and extracted_h:
-            vid_width, vid_height = extracted_w, extracted_h
-            logger.info(f"Detected native MP4 dimensions: {vid_width}x{vid_height}")
-
-        # Download thumbnail for instant visual preview
-        thumb_bytes = None
-        if thumbnail_url:
-            try:
-                r_th = requests.get(thumbnail_url, headers=stream_headers, timeout=6)
-                if r_th.status_code == 200 and len(r_th.content) > 100:
-                    thumb_bytes = r_th.content
-            except Exception as e:
-                logger.warning(f"Failed to fetch thumbnail: {e}")
-
-        # 4. Upload video file to Telegram with native frame dimensions and cover
-        edit_telegram_message(
-            chat_id,
-            status_msg_id,
-            f"🚀 **Uploading {platform['name']} video to chat...**"
-        )
-
-        caption_text = f"🎬 {platform['emoji']} {platform['name']}\n\n📌 {title[:80]}"
-
-        send_data = {
-            "chat_id": chat_id,
-            "caption": caption_text,
-            "supports_streaming": "true",
-        }
-        if duration:
-            send_data["duration"] = int(duration)
-        if vid_width and vid_height:
-            send_data["width"] = int(vid_width)
-            send_data["height"] = int(vid_height)
-
-        files = {
-            "video": (os.path.basename(tmp_file), None, "video/mp4")
-        }
-
-        with open(tmp_file, "rb") as vf:
-            files["video"] = (os.path.basename(tmp_file), vf, "video/mp4")
-            if thumb_bytes:
-                files["thumbnail"] = ("thumb.jpg", thumb_bytes, "image/jpeg")
-
-            upload_res = requests.post(
-                f"{TELEGRAM_API}/sendVideo",
-                data=send_data,
-                files=files,
-                timeout=50
+        # 4. Upload to Telegram (Photo vs Video)
+        if media_type == "image":
+            edit_telegram_message(
+                chat_id,
+                status_msg_id,
+                f"🚀 **Uploading {platform['name']} photo to chat...**"
             )
+            caption_text = f"🖼️ {platform['emoji']} {platform['name']}\n\n📌 {title[:80]}"
+            with open(tmp_file, "rb") as pf:
+                upload_res = requests.post(
+                    f"{TELEGRAM_API}/sendPhoto",
+                    data={"chat_id": chat_id, "caption": caption_text},
+                    files={"photo": (os.path.basename(tmp_file), pf, "image/jpeg")},
+                    timeout=40
+                )
+        else:
+            # Inspect exact native dimensions from MP4 file header
+            extracted_w, extracted_h = extract_mp4_dimensions(tmp_file)
+            if extracted_w and extracted_h:
+                vid_width, vid_height = extracted_w, extracted_h
+                logger.info(f"Detected native MP4 dimensions: {vid_width}x{vid_height}")
+
+            thumb_bytes = None
+            if thumbnail_url:
+                try:
+                    r_th = requests.get(thumbnail_url, headers=stream_headers, timeout=6)
+                    if r_th.status_code == 200 and len(r_th.content) > 100:
+                        thumb_bytes = r_th.content
+                except Exception as e:
+                    logger.warning(f"Failed to fetch thumbnail: {e}")
+
+            edit_telegram_message(
+                chat_id,
+                status_msg_id,
+                f"🚀 **Uploading {platform['name']} video to chat...**"
+            )
+            caption_text = f"🎬 {platform['emoji']} {platform['name']}\n\n📌 {title[:80]}"
+            send_data = {
+                "chat_id": chat_id,
+                "caption": caption_text,
+                "supports_streaming": "true",
+            }
+            if duration:
+                send_data["duration"] = int(duration)
+            if vid_width and vid_height:
+                send_data["width"] = int(vid_width)
+                send_data["height"] = int(vid_height)
+
+            files = {"video": (os.path.basename(tmp_file), None, "video/mp4")}
+            with open(tmp_file, "rb") as vf:
+                files["video"] = (os.path.basename(tmp_file), vf, "video/mp4")
+                if thumb_bytes:
+                    files["thumbnail"] = ("thumb.jpg", thumb_bytes, "image/jpeg")
+
+                upload_res = requests.post(
+                    f"{TELEGRAM_API}/sendVideo",
+                    data=send_data,
+                    files=files,
+                    timeout=50
+                )
 
         try:
             os.remove(tmp_file)
@@ -602,11 +746,11 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
         clean_err = str(de).split(";")[0].replace("ERROR:", "").strip()
         edit_telegram_message(chat_id, status_msg_id, f"❌ Extraction error: {clean_err[:120]}")
     except Exception as e:
-        logger.error(f"Error handling video: {e}", exc_info=True)
+        logger.error(f"Error handling media: {e}", exc_info=True)
         edit_telegram_message(
             chat_id,
             status_msg_id,
-            f"❌ Error downloading video: {str(e)[:100]}"
+            f"❌ Error downloading media: {str(e)[:100]}"
         )
 
 
@@ -694,18 +838,23 @@ class handler(BaseHTTPRequestHandler):
                 snap_u, _, _ = extract_snapchat_direct(target_url)
                 if snap_u:
                     direct_url = snap_u
+            elif platform.get("name") == "Pinterest":
+                pin_u, pin_mtype, _, _, _, _, _ = extract_pinterest_direct(target_url)
+                if pin_u:
+                    direct_url = pin_u
 
             if not direct_url:
                 try:
                     fmt_str = (
-                        f"best[height<={q_height}][ext=mp4][acodec!=none]/best[height<={q_height}][ext=mp4]/best[height<={q_height}]/best"
+                        f"best[height<={q_height}][ext=mp4][acodec!=none]/best[height<={q_height}][ext=mp4]/best[height<={q_height}]/best/bestvideo/bv/b"
                         if q_height
-                        else "best[ext=mp4][acodec!=none]/best[ext=mp4]/best"
+                        else "best[ext=mp4][acodec!=none]/best[ext=mp4]/best/bestvideo/bv/b"
                     )
                     ydl_opts = {
                         "quiet": True,
                         "no_warnings": True,
                         "noplaylist": True,
+                        "ignore_no_formats_error": True,
                         "format": fmt_str,
                         "http_headers": {
                             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -714,45 +863,51 @@ class handler(BaseHTTPRequestHandler):
                     }
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         info = ydl.extract_info(target_url, download=False)
-                        if "entries" in info and info["entries"]:
+                        if info and "entries" in info and info["entries"]:
                             info = info["entries"][0]
 
                     chosen_format = None
-                    if "formats" in info:
-                        if q_height:
-                            for f in reversed(info["formats"]):
-                                if f.get("url") and f.get("ext") == "mp4" and f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("height") and f.get("height") <= q_height:
-                                    chosen_format = f
-                                    direct_url = f["url"]
-                                    break
-                        if not direct_url:
-                            for f in reversed(info["formats"]):
-                                if f.get("url") and f.get("ext") == "mp4" and f.get("vcodec") != "none" and f.get("acodec") != "none":
-                                    chosen_format = f
-                                    direct_url = f["url"]
-                                    break
-                        if not direct_url:
-                            for f in reversed(info["formats"]):
-                                if f.get("url") and f.get("ext") == "mp4":
-                                    chosen_format = f
-                                    direct_url = f["url"]
-                                    break
-                    if not direct_url:
-                        direct_url = info.get("url")
+                    if info:
+                        if "formats" in info and info["formats"]:
+                            if q_height:
+                                for f in reversed(info["formats"]):
+                                    if f.get("url") and f.get("ext") == "mp4" and f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("height") and f.get("height") <= q_height:
+                                        chosen_format = f
+                                        direct_url = f["url"]
+                                        break
+                            if not direct_url:
+                                for f in reversed(info["formats"]):
+                                    if f.get("url") and f.get("ext") == "mp4" and f.get("vcodec") != "none" and f.get("acodec") != "none":
+                                        chosen_format = f
+                                        direct_url = f["url"]
+                                        break
+                            if not direct_url:
+                                for f in reversed(info["formats"]):
+                                    if f.get("url") and (f.get("ext") == "mp4" or f.get("vcodec") != "none"):
+                                        chosen_format = f
+                                        direct_url = f["url"]
+                                        break
 
-                    if chosen_format and chosen_format.get("http_headers"):
-                        stream_headers.update(chosen_format["http_headers"])
-                    elif info.get("http_headers"):
-                        stream_headers.update(info["http_headers"])
-                    elif "instagram.com" in target_url.lower():
-                        stream_headers["Referer"] = "https://www.instagram.com/"
-                    elif "tiktok.com" in target_url.lower():
-                        stream_headers["Referer"] = "https://www.tiktok.com/"
+                        # If no video stream, check for image/photo thumbnails (Instagram, Pinterest, X)
+                        if not direct_url:
+                            if info.get("thumbnails"):
+                                direct_url = info["thumbnails"][-1].get("url")
+                            elif info.get("url"):
+                                direct_url = info.get("url")
+
+                        if chosen_format and chosen_format.get("http_headers"):
+                            stream_headers.update(chosen_format["http_headers"])
+                        elif info.get("http_headers"):
+                            stream_headers.update(info["http_headers"])
+                        elif "instagram.com" in target_url.lower():
+                            stream_headers["Referer"] = "https://www.instagram.com/"
+                        elif "tiktok.com" in target_url.lower():
+                            stream_headers["Referer"] = "https://www.tiktok.com/"
                 except Exception as ydl_err:
                     logger.warning(f"yt-dlp extraction failed: {ydl_err}")
 
             if not direct_url:
-                self._send_json(404, {"error": "Could not extract video stream from URL"})
+                self._send_json(404, {"error": "Could not extract media stream from URL"})
                 return
 
             # If client requested JSON format
