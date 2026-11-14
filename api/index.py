@@ -939,13 +939,6 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
                         f"⚠️ Media size ({total_bytes // (1024 * 1024)} MB) exceeds Telegram's 50 MB upload limit."
                     )
                     return
-                    os.remove(tmp_file)
-                edit_telegram_message(
-                    chat_id,
-                    status_msg_id,
-                    f"⚠️ Media size ({total_bytes // (1024 * 1024)} MB) exceeds Telegram's 50 MB upload limit."
-                )
-                return
 
         if not os.path.exists(tmp_file) or os.path.getsize(tmp_file) == 0:
             edit_telegram_message(
@@ -955,7 +948,16 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
             )
             return
 
-        # 4. Upload to Telegram (Photo vs Video)
+        # 4. Verify actual file binary magic bytes to determine photo vs video
+        with open(tmp_file, "rb") as check_f:
+            header_sample = check_f.read(16)
+
+        if header_sample.startswith(b"\xff\xd8\xff") or header_sample.startswith(b"\x89PNG") or b"WEBP" in header_sample:
+            media_type = "image"
+        elif len(header_sample) >= 8 and header_sample[4:8] == b"ftyp":
+            media_type = "video"
+
+        # 5. Upload to Telegram (Photo vs Video)
         if media_type == "image":
             edit_telegram_message(
                 chat_id,
