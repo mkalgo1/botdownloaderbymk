@@ -360,14 +360,14 @@ def render_shortcut_page() -> str:
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "SF Pro", "Segoe UI", Roboto, sans-serif; }}
     body {{ background: #0b0f19; color: #f3f4f6; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px 16px; }}
-    .card {{ background: #131b2e; border: 1px solid #1f2d47; border-radius: 24px; padding: 32px 24px; max-width: 480px; width: 100%; box-shadow: 0 20px 40px rgba(0,0,0,0.5); text-align: center; }}
+    .card {{ background: #131b2e; border: 1px solid #1f2d47; border-radius: 24px; padding: 32px 24px; max-width: 520px; width: 100%; box-shadow: 0 20px 40px rgba(0,0,0,0.5); text-align: center; }}
     .icon {{ font-size: 54px; margin-bottom: 14px; display: inline-block; }}
     h1 {{ font-size: 24px; font-weight: 700; color: #fff; margin-bottom: 8px; }}
     p.subtitle {{ font-size: 14px; color: #94a3b8; margin-bottom: 20px; line-height: 1.5; }}
     .copy-box {{ background: #0b1120; border: 1px dashed #3b82f6; border-radius: 14px; padding: 14px; margin-bottom: 20px; text-align: left; }}
     .copy-label {{ font-size: 11px; text-transform: uppercase; color: #60a5fa; font-weight: 700; letter-spacing: 0.5px; margin-bottom: 6px; }}
     .copy-url {{ font-family: ui-monospace, monospace; font-size: 12px; color: #38bdf8; word-break: break-all; margin-bottom: 10px; display: block; }}
-    .btn {{ display: block; width: 100%; background: linear-gradient(135deg, #2563eb, #1d4ed8); color: #fff; text-decoration: none; font-size: 16px; font-weight: 600; padding: 14px; border-radius: 14px; border: none; cursor: pointer; transition: transform 0.15s, opacity 0.15s; box-shadow: 0 8px 20px rgba(37, 99, 235, 0.35); }}
+    .btn {{ display: block; width: 100%; background: linear-gradient(135deg, #2563eb, #1d4ed8); color: #fff; text-decoration: none; font-size: 15px; font-weight: 600; padding: 13px; border-radius: 14px; border: none; cursor: pointer; transition: transform 0.15s, opacity 0.15s; box-shadow: 0 8px 20px rgba(37, 99, 235, 0.35); text-align: center; }}
     .btn:active {{ transform: scale(0.98); opacity: 0.9; }}
     .steps {{ background: #0f1626; border-radius: 16px; padding: 18px 16px; text-align: left; margin-top: 20px; border: 1px solid #1a253b; }}
     .step {{ display: flex; align-items: flex-start; gap: 12px; margin-bottom: 14px; font-size: 13.5px; color: #cbd5e1; line-height: 1.45; }}
@@ -381,34 +381,38 @@ def render_shortcut_page() -> str:
   <div class="card">
     <div class="icon">⚡</div>
     <h1>Downloader Mk Shortcut</h1>
-    <p class="subtitle">iOS requires shortcuts to be added inside the Shortcuts app. Here is your 1-click webhook link ready to paste!</p>
+    <p class="subtitle">Save Pinterest, TikTok, Instagram & more straight into your iPhone Photos app!</p>
 
     <div class="copy-box">
-      <div class="copy-label">Your Bot Webhook URL</div>
-      <span class="copy-url" id="webhookUrl">https://botdownloaderbymk.vercel.app/api/share?url=</span>
-      <button class="btn" onclick="copyUrl()">📋 Copy URL for Shortcut</button>
+      <div class="copy-label">Direct Download Stream URL</div>
+      <span class="copy-url" id="streamUrl">https://botdownloaderbymk.vercel.app/api/stream?url=</span>
+      <button class="btn" onclick="copyUrl()">📋 Copy Stream URL</button>
       <div class="toast" id="toast">✅ Copied to clipboard!</div>
     </div>
     
     <div class="steps">
       <div class="step">
         <span class="badge">1</span>
-        <div>In Apple <b>Shortcuts</b>, tap <b><code>Get Contents of URL 1</code></b> (or tap <b>+</b> to create new).</div>
+        <div>In Apple <b>Shortcuts</b>, tap <b>+</b> to create a new shortcut. Tap the <b>( ⓘ )</b> at bottom and turn <b>ON &quot;Show in Share Sheet&quot;</b>.</div>
       </div>
       <div class="step">
         <span class="badge">2</span>
-        <div>Tap the <b>( ⓘ )</b> icon at bottom &rarr; turn <b>ON &quot;Show in Share Sheet&quot;</b>.</div>
+        <div>Add action: <b><code>Get URLs from Shortcut Input</code></b> (Crucial for Pinterest/TikTok so the link is cleanly extracted).</div>
       </div>
       <div class="step">
         <span class="badge">3</span>
-        <div>In the URL box, paste the copied link, and tap after <code>?url=</code> to add <b>Shortcut Input</b>. Tap Done!</div>
+        <div>Add action: <b><code>Get Contents of URL</code></b>. Set URL to: <code>https://botdownloaderbymk.vercel.app/api/stream?url=</code> followed by <b><code>[URLs]</code></b>.</div>
+      </div>
+      <div class="step">
+        <span class="badge">4</span>
+        <div>Add action: <b><code>Save to Photo Album</code></b> (saves <code>[Contents of URL]</code> to <b>Recents</b>). Tap Done!</div>
       </div>
     </div>
   </div>
 
   <script>
     function copyUrl() {{
-      const text = document.getElementById('webhookUrl').innerText;
+      const text = document.getElementById('streamUrl').innerText;
       navigator.clipboard.writeText(text).then(() => {{
         const t = document.getElementById('toast');
         t.style.display = 'block';
@@ -808,9 +812,24 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(html.encode("utf-8"))
             return
 
-        # Direct Video Stream for iOS Shortcut (Saves straight to iPhone Camera Roll without Telegram)
+        # Direct Video/Media Stream for iOS Shortcut (Saves straight to iPhone Camera Roll without Telegram)
         if action == "stream" or "stream" in full_path or action == "download" or "download" in full_path:
-            raw_url = query.get("url", [""])[0]
+            raw_url = (
+                query.get("url", [""])[0]
+                or query.get("link", [""])[0]
+                or query.get("u", [""])[0]
+                or query.get("text", [""])[0]
+                or query.get("q", [""])[0]
+                or query.get("input", [""])[0]
+            )
+
+            # If parameter was missing or empty, search full decoded path and query string
+            if not raw_url:
+                full_decoded = urllib.parse.unquote(self.path)
+                m_all = URL_REGEX.search(full_decoded)
+                if m_all:
+                    raw_url = m_all.group(0)
+
             quality_raw = query.get("quality", ["best"])[0].lower()
             m_q = re.search(r"\d+", quality_raw)
             q_height = int(m_q.group(0)) if m_q else None
@@ -819,11 +838,15 @@ class handler(BaseHTTPRequestHandler):
             target_url = m.group(0) if m else raw_url.strip()
 
             if not target_url:
-                self._send_json(400, {"error": "Missing 'url' query parameter"})
+                self._send_json(400, {
+                    "error": "Missing 'url' query parameter",
+                    "tip": "In your iOS Shortcut, add 'Get URLs from Shortcut Input' before 'Get Contents of URL'."
+                })
                 return
 
             platform = detect_platform(target_url)
             direct_url = None
+            media_type = "video"
             stream_headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             }
@@ -842,6 +865,7 @@ class handler(BaseHTTPRequestHandler):
                 pin_u, pin_mtype, _, _, _, _, _ = extract_pinterest_direct(target_url)
                 if pin_u:
                     direct_url = pin_u
+                    media_type = pin_mtype or "video"
 
             if not direct_url:
                 try:
@@ -892,6 +916,7 @@ class handler(BaseHTTPRequestHandler):
                         if not direct_url:
                             if info.get("thumbnails"):
                                 direct_url = info["thumbnails"][-1].get("url")
+                                media_type = "image"
                             elif info.get("url"):
                                 direct_url = info.get("url")
 
@@ -915,12 +940,55 @@ class handler(BaseHTTPRequestHandler):
                 self._send_json(200, {
                     "status": "success",
                     "url": direct_url,
-                    "platform": platform["name"]
+                    "platform": platform["name"],
+                    "media_type": media_type
                 })
                 return
 
-            # Direct 302 Redirect to high-speed CDN URL
-            # Completely avoids Vercel's 4.5MB serverless response payload limit and 10s lambda timeout.
+            # Special handling for HLS (.m3u8) streams (like Pinterest story videos):
+            # Apple Shortcuts 'Get Contents of URL' downloads .m3u8 as a text file which Photos cannot save.
+            # Convert fragments to a real MP4 on the fly and stream directly to iOS if <= 4.5 MB!
+            if ".m3u8" in direct_url and media_type == "video":
+                try:
+                    tmp_hls = os.path.join(tempfile.gettempdir(), f"stream_{uuid.uuid4().hex[:6]}.mp4")
+                    ydl_hls_opts = {
+                        "quiet": True,
+                        "no_warnings": True,
+                        "format": "bestvideo/bv/best",
+                        "outtmpl": tmp_hls.replace(".mp4", "") + ".%(ext)s"
+                    }
+                    with yt_dlp.YoutubeDL(ydl_hls_opts) as ydl_h:
+                        ydl_h.download([direct_url])
+
+                    real_mp4 = tmp_hls
+                    if not os.path.exists(real_mp4):
+                        base = tmp_hls.replace(".mp4", "")
+                        for ext in [".mp4", ".mkv", ".ts"]:
+                            if os.path.exists(base + ext):
+                                real_mp4 = base + ext
+                                break
+
+                    if os.path.exists(real_mp4):
+                        fsize = os.path.getsize(real_mp4)
+                        if 0 < fsize <= 4400000:
+                            with open(real_mp4, "rb") as vf:
+                                v_data = vf.read()
+                            try:
+                                os.remove(real_mp4)
+                            except Exception:
+                                pass
+                            self.send_response(200)
+                            self.send_header("Content-Type", "video/mp4")
+                            self.send_header("Content-Disposition", 'attachment; filename="pinterest_video.mp4"')
+                            self.send_header("Content-Length", str(len(v_data)))
+                            self.send_header("Access-Control-Allow-Origin", "*")
+                            self.end_headers()
+                            self.wfile.write(v_data)
+                            return
+                except Exception as hls_err:
+                    logger.warning(f"Failed to stream converted HLS: {hls_err}")
+
+            # Direct 302 Redirect to high-speed CDN URL (Photos, Videos)
             # Apple Shortcuts 'Get Contents of URL' follows 302 redirects automatically and saves directly to Photos!
             self.send_response(302)
             self.send_header("Location", direct_url)
