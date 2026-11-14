@@ -200,8 +200,9 @@ def extract_tiktok_direct(url: str):
 
 def extract_pinterest_direct(url: str):
     """
-    Extracts direct Pinterest video or high-res photo from PinResource API.
-    Handles pin.it short links, standard pins, idea pins, and video pins cleanly.
+    Extracts direct Pinterest video (with audio/sound) or high-res photo.
+    Resolves pin.it short links, retrieves direct expMp4 720p stream with full sound,
+    or extracts full-resolution uncompressed photo.
     """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -209,16 +210,27 @@ def extract_pinterest_direct(url: str):
         "X-Pinterest-PWS-Handler": "www/[username].js"
     }
 
-    # 1. Expand short links (pin.it/...)
+    # 1. Expand short links (pin.it/...) and get page HTML
     expanded_url = url
-    if "pin.it" in url:
-        try:
-            r = requests.get(url, allow_redirects=True, headers=headers, timeout=8)
-            expanded_url = r.url
-        except Exception as e:
-            logger.warning(f"Error expanding pin.it: {e}")
+    page_html = ""
+    try:
+        r = requests.get(url, allow_redirects=True, headers=headers, timeout=8)
+        expanded_url = r.url
+        page_html = r.text
+    except Exception as e:
+        logger.warning(f"Error expanding pin.it: {e}")
 
-    # 2. Extract Pin ID
+    # 2. Check for direct expMp4 video with full sound directly in the web HTML
+    if page_html:
+        mp4_matches = re.findall(r'https://v1\.pinimg\.com/videos/iht/expMp4/[^"\'\s<>]+\.mp4', page_html)
+        if mp4_matches:
+            direct_mp4 = mp4_matches[0].replace('\\u0026', '&').replace('\\"', '').replace('\\', '')
+            title_m = re.search(r'<title>(.*?)</title>', page_html, re.IGNORECASE)
+            title = title_m.group(1).split(" | ")[0].split(" - ")[0].strip() if title_m else "Pinterest Video"
+            logger.info(f"Extracted direct Pinterest MP4 with sound from HTML: {direct_mp4[:80]}")
+            return direct_mp4, "video", title, 0, None, None, None
+
+    # 3. Extract Pin ID
     pin_id_match = re.search(r"pin/(\d+)", expanded_url)
     if not pin_id_match:
         pin_id_match = re.search(r"pin/(\d+)", url)
@@ -227,7 +239,7 @@ def extract_pinterest_direct(url: str):
 
     pin_id = pin_id_match.group(1)
 
-    # 3. Query Pinterest PinResource API
+    # 4. Query Pinterest PinResource API
     params = {
         "source_url": f"/pin/{pin_id}/",
         "data": json.dumps({
@@ -252,6 +264,13 @@ def extract_pinterest_direct(url: str):
                         return v_list[q]["url"], "video", title, v_list[q].get("duration", 0), v_list[q].get("width"), v_list[q].get("height"), thumb
                 if "V_HLSV3_MOBILE" in v_list and v_list["V_HLSV3_MOBILE"].get("url"):
                     vhls = v_list["V_HLSV3_MOBILE"]
+                    # Try deriving direct expMp4 with sound
+                    cand_mp4 = vhls["url"].replace("/hls/", "/expMp4/").replace(".m3u8", "_720w.mp4")
+                    try:
+                        if requests.head(cand_mp4, timeout=3).status_code == 200:
+                            return cand_mp4, "video", title, vhls.get("duration", 0), vhls.get("width"), vhls.get("height"), thumb
+                    except Exception:
+                        pass
                     return vhls["url"], "video", title, vhls.get("duration", 0), vhls.get("width"), vhls.get("height"), thumb
 
             # Check story_pin_data for video
@@ -266,6 +285,12 @@ def extract_pinterest_direct(url: str):
                                     return v_list[q]["url"], "video", title, v_list[q].get("duration", 0), v_list[q].get("width"), v_list[q].get("height"), thumb
                             if "V_HLSV3_MOBILE" in v_list and v_list["V_HLSV3_MOBILE"].get("url"):
                                 vhls = v_list["V_HLSV3_MOBILE"]
+                                cand_mp4 = vhls["url"].replace("/hls/", "/expMp4/").replace(".m3u8", "_720w.mp4")
+                                try:
+                                    if requests.head(cand_mp4, timeout=3).status_code == 200:
+                                        return cand_mp4, "video", title, vhls.get("duration", 0), vhls.get("width"), vhls.get("height"), thumb
+                                except Exception:
+                                    pass
                                 return vhls["url"], "video", title, vhls.get("duration", 0), vhls.get("width"), vhls.get("height"), thumb
 
             # If not a video, extract full resolution original photo
