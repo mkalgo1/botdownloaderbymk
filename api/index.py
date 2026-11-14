@@ -1,12 +1,17 @@
+import io
 import json
 import logging
 import os
 import plistlib
 import re
+import shutil
 import struct
+import subprocess
+import sys
 import tempfile
 import urllib.parse
 import uuid
+import zipfile
 from http.server import BaseHTTPRequestHandler
 import requests
 import yt_dlp
@@ -179,6 +184,180 @@ def extract_mp4_dimensions(file_path: str):
     return width, height
 
 
+def ensure_ffmpeg() -> str:
+    """
+    Ensures FFmpeg executable is available.
+    1. Checks system PATH (e.g. local Windows/Linux).
+    2. Checks /tmp/ffmpeg (Vercel serverless environment).
+    3. If running on Linux x86_64 on Vercel, automatically downloads and extracts
+       a static binary to /tmp/ffmpeg and caches it for future invocations.
+    """
+    path = shutil.which("ffmpeg")
+    if path:
+        return path
+
+    tmp_bin = os.path.join(tempfile.gettempdir(), "ffmpeg")
+    if os.path.exists(tmp_bin) and os.path.getsize(tmp_bin) > 5000000:
+        if not os.access(tmp_bin, os.X_OK):
+            try:
+                os.chmod(tmp_bin, 0o755)
+            except Exception:
+                pass
+        return tmp_bin
+
+    if sys.platform.startswith("linux"):
+        try:
+            logger.info("Downloading static FFmpeg for Linux...")
+            url = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v6.1/ffmpeg-6.1-linux-64.zip"
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=25)
+            if r.status_code == 200:
+                with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+                    z.extract("ffmpeg", tempfile.gettempdir())
+                if os.path.exists(tmp_bin):
+                    os.chmod(tmp_bin, 0o755)
+                    logger.info("FFmpeg static binary extracted successfully to /tmp/ffmpeg")
+                    return tmp_bin
+        except Exception as e:
+            logger.warning(f"Could not setup static ffmpeg: {e}")
+
+    return None
+
+
+def mix_image_and_audio(image_src: str, audio_src: str, output_path: str = None, headers: dict = None) -> str:
+    """
+    Combines a static image (photo) and an audio track into a standard H.264 MP4 video.
+    Supports either local file paths or remote HTTP URLs for image and audio.
+    Automatically handles odd pixel dimensions (scale=trunc(iw/2)*2:trunc(ih/2)*2).
+    Outputs a lightweight MP4 with faststart suitable for Telegram and iOS Shortcuts.
+    """
+    ffmpeg_bin = ensure_ffmpeg()
+    if not ffmpeg_bin:
+        logger.warning("FFmpeg not available to mix image and audio")
+        return None
+
+    h = headers or {"User-Agent": "Mozilla/5.0"}
+    local_img = image_src
+    local_aud = audio_src
+    created_temp_files = []
+
+    try:
+        # Download image if remote URL
+        if image_src.startswith("http://") or image_src.startswith("https://"):
+            ext = ".png" if ".png" in image_src.lower() else ".jpg"
+            tmp_img_file = os.path.join(tempfile.gettempdir(), f"mix_img_{uuid.uuid4().hex[:6]}{ext}")
+            r_img = requests.get(image_src, headers=h, timeout=12)
+            if r_img.status_code != 200 or len(r_img.content) < 100:
+                logger.warning(f"Failed to fetch image for mixing: status {r_img.status_code}")
+                return None
+            with open(tmp_img_file, "wb") as f:
+                f.write(r_img.content)
+            local_img = tmp_img_file
+            created_temp_files.append(tmp_img_file)
+
+        # Download audio if remote URL
+        if audio_src.startswith("http://") or audio_src.startswith("https://"):
+            ext = ".m4a" if ".m4a" in audio_src.lower() else ".mp3"
+            tmp_aud_file = os.path.join(tempfile.gettempdir(), f"mix_aud_{uuid.uuid4().hex[:6]}{ext}")
+            r_aud = requests.get(audio_src, headers=h, timeout=15)
+            if r_aud.status_code != 200 or len(r_aud.content) < 100:
+                logger.warning(f"Failed to fetch audio for mixing: status {r_aud.status_code}")
+                return None
+            with open(tmp_aud_file, "wb") as f:
+                f.write(r_aud.content)
+            local_aud = tmp_aud_file
+            created_temp_files.append(tmp_aud_file)
+
+        if not output_path:
+            output_path = os.path.join(tempfile.gettempdir(), f"mixed_vid_{uuid.uuid4().hex[:6]}.mp4")
+
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-loop", "1", "-i", local_img,
+            "-i", local_aud,
+            "-c:v", "libx264",
+            "-tune", "stillimage",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-pix_fmt", "yuv420p",
+            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-shortest",
+            "-movflags", "+faststart",
+            output_path
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=40)
+        if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            logger.info(f"Successfully mixed image and audio into MP4 ({os.path.getsize(output_path)} bytes): {output_path}")
+            return output_path
+        else:
+            logger.warning(f"FFmpeg mixing failed (code {res.returncode}): {res.stderr.decode('utf-8', errors='ignore')[-300:]}")
+            return None
+    except Exception as e:
+        logger.warning(f"Error in mix_image_and_audio: {e}")
+        return None
+    finally:
+        for tf in created_temp_files:
+            try:
+                if os.path.exists(tf):
+                    os.remove(tf)
+            except Exception:
+                pass
+
+
+def extract_instagram_direct(url: str):
+    """
+    Extracts Instagram video (including pre-rendered photo with music) or high-res photo.
+    Uses vxinstagram gateway and Open Graph metadata fallback.
+    Returns: (media_url, media_type, title, thumbnail_url, audio_url)
+    """
+    try:
+        m = re.search(r'/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)', url)
+        if not m:
+            return None, None, None, None, None
+        shortcode = m.group(1)
+
+        # 1. Query vxinstagram with TelegramBot user-agent
+        vx_url = f"https://www.vxinstagram.com/reel/{shortcode}/"
+        headers = {
+            "User-Agent": "TelegramBot (like TwitterBot)",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        }
+        r = requests.get(vx_url, headers=headers, timeout=8)
+        if r.status_code == 200 and r.text:
+            html = r.text
+            v_matches = re.findall(r'<meta property="og:video" content="([^"]+)"', html)
+            if not v_matches:
+                v_matches = re.findall(r'<meta property="twitter:player:stream" content="([^"]+)"', html)
+
+            img_matches = re.findall(r'<meta property="og:image" content="([^"]+)"', html)
+            title_m = re.search(r'<meta property="og:title" content="([^"]+)"', html)
+            title = title_m.group(1) if title_m else "Instagram Media"
+
+            if v_matches:
+                vid_url = v_matches[0]
+                thumb = img_matches[0] if img_matches else None
+                return vid_url, "video", title, thumb, None
+            elif img_matches:
+                img_url = img_matches[0]
+                return img_url, "image", title, img_url, None
+
+        # 2. Direct Instagram page check
+        r_ig = requests.get(f"https://www.instagram.com/p/{shortcode}/", headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }, timeout=8)
+        if r_ig.status_code == 200:
+            og_v = re.findall(r'<meta property="og:video" content="([^"]+)"', r_ig.text)
+            og_i = re.findall(r'<meta property="og:image" content="([^"]+)"', r_ig.text)
+            if og_v:
+                return og_v[0].replace("&amp;", "&"), "video", "Instagram Video", og_i[0] if og_i else None, None
+            if og_i:
+                return og_i[0].replace("&amp;", "&"), "image", "Instagram Photo", og_i[0], None
+
+    except Exception as e:
+        logger.warning(f"extract_instagram_direct failed: {e}")
+    return None, None, None, None, None
+
+
 def extract_tiktok_direct(url: str):
     try:
         api_url = f"https://tikwm.com/api/?url={urllib.parse.quote(url, safe=':/?=&')}"
@@ -192,10 +371,13 @@ def extract_tiktok_direct(url: str):
                 title = d.get("title") or "TikTok Video"
                 duration = d.get("duration", 0)
                 cover_url = d.get("cover") or d.get("origin_cover")
-                return play_url, hd_url, title, duration, cover_url
+                music_url = d.get("music") or (d.get("music_info") or {}).get("play")
+                images = d.get("images") or []
+                image_url = images[0] if images else None
+                return play_url, hd_url, title, duration, cover_url, image_url, music_url
     except Exception as e:
         logger.warning(f"TikWM extraction failed: {e}")
-    return None, None, None, None, None
+    return None, None, None, None, None, None, None
 
 
 def extract_pinterest_direct(url: str):
@@ -517,14 +699,16 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
     vid_width = None
     vid_height = None
     thumbnail_url = None
+    image_to_mix = None
+    audio_to_mix = None
     stream_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
 
     try:
-        # 1. Specialized fast extractors for TikTok, Snapchat & Pinterest
+        # 1. Specialized fast extractors for TikTok, Instagram, Snapchat & Pinterest
         if platform.get("name") == "TikTok":
-            tk_play, tk_hd, tk_title, tk_dur, tk_cov = extract_tiktok_direct(url)
+            tk_play, tk_hd, tk_title, tk_dur, tk_cov, tk_img, tk_music = extract_tiktok_direct(url)
             if tk_play:
                 direct_url = tk_hd or tk_play
                 if tk_title:
@@ -534,6 +718,30 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
                 thumbnail_url = tk_cov
                 media_type = "video"
                 logger.info(f"TikWM extraction succeeded for TikTok: {direct_url[:80]}")
+            elif tk_img and tk_music:
+                image_to_mix = tk_img
+                audio_to_mix = tk_music
+                media_type = "image_with_audio"
+                title = tk_title or "TikTok Photo"
+                thumbnail_url = tk_cov or tk_img
+                logger.info(f"TikTok photo with music detected: {image_to_mix[:60]} + {audio_to_mix[:60]}")
+            elif tk_img:
+                direct_url = tk_img
+                media_type = "image"
+                title = tk_title or "TikTok Photo"
+                thumbnail_url = tk_img
+        elif platform.get("name") == "Instagram":
+            ig_u, ig_mtype, ig_title, ig_thumb, ig_audio = extract_instagram_direct(url)
+            if ig_u:
+                direct_url = ig_u
+                media_type = ig_mtype
+                title = ig_title or title
+                thumbnail_url = ig_thumb
+                if ig_audio:
+                    image_to_mix = ig_u
+                    audio_to_mix = ig_audio
+                    media_type = "image_with_audio"
+                logger.info(f"Instagram direct extraction succeeded ({media_type}): {direct_url[:80]}")
         elif platform.get("name") == "Snapchat":
             snap_u, snap_t, snap_d = extract_snapchat_direct(url)
             if snap_u:
@@ -560,76 +768,102 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
                 logger.info(f"Pinterest direct extraction succeeded ({media_type}): {direct_url[:80]}")
 
         # 2. Universal yt-dlp extractor fallback (handles all videos AND photos)
-        if not direct_url:
-            ydl_opts = {
-                "quiet": True,
-                "no_warnings": True,
-                "noplaylist": True,
-                "ignore_no_formats_error": True,
-                "format": "best[ext=mp4][acodec!=none]/best[ext=mp4]/best/bestvideo/bv/b",
-                "http_headers": {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "en-us,en;q=0.5",
+        if not direct_url and not (image_to_mix and audio_to_mix):
+            try:
+                ydl_opts = {
+                    "quiet": True,
+                    "no_warnings": True,
+                    "noplaylist": True,
+                    "ignore_no_formats_error": True,
+                    "format": "bestvideo+bestaudio/best[ext=mp4][acodec!=none]/best[ext=mp4]/best/bestvideo/bv/b",
+                    "http_headers": {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Accept-Language": "en-us,en;q=0.5",
+                    }
                 }
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                if info and "entries" in info and info["entries"]:
-                    info = info["entries"][0]
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    if info and "entries" in info and info["entries"]:
+                        info = info["entries"][0]
 
-            if info:
-                if info.get("title"):
-                    title = str(info["title"]).strip()
-                if info.get("duration"):
-                    duration = int(info["duration"])
-                if info.get("thumbnail"):
-                    thumbnail_url = info.get("thumbnail")
-                if info.get("width"):
-                    vid_width = info.get("width")
-                if info.get("height"):
-                    vid_height = info.get("height")
+                if info:
+                    if info.get("title"):
+                        title = str(info["title"]).strip()
+                    if info.get("duration"):
+                        duration = int(info["duration"])
+                    if info.get("thumbnail"):
+                        thumbnail_url = info.get("thumbnail")
+                    if info.get("width"):
+                        vid_width = info.get("width")
+                    if info.get("height"):
+                        vid_height = info.get("height")
 
-                chosen_format = None
-                if "formats" in info and info["formats"]:
-                    for f in reversed(info["formats"]):
-                        if f.get("url") and f.get("ext") == "mp4" and f.get("vcodec") != "none" and f.get("acodec") != "none":
-                            chosen_format = f
-                            direct_url = f["url"]
-                            media_type = "video"
-                            break
-                    if not direct_url:
+                    chosen_format = None
+                    audio_fmt = None
+                    if "formats" in info and info["formats"]:
                         for f in reversed(info["formats"]):
-                            if f.get("url") and (f.get("ext") == "mp4" or f.get("vcodec") != "none"):
+                            if f.get("url") and f.get("ext") == "mp4" and f.get("vcodec") != "none" and f.get("acodec") != "none":
                                 chosen_format = f
                                 direct_url = f["url"]
                                 media_type = "video"
                                 break
+                        if not direct_url:
+                            for f in reversed(info["formats"]):
+                                if f.get("url") and (f.get("ext") == "mp4" or f.get("vcodec") != "none"):
+                                    chosen_format = f
+                                    direct_url = f["url"]
+                                    media_type = "video"
+                                    break
+                        for f in reversed(info["formats"]):
+                            if f.get("url") and f.get("acodec") != "none":
+                                audio_fmt = f
+                                break
 
-                # If no video format found, inspect thumbnails for photo / image posts (Instagram, Pinterest, X, Reddit)
-                if not direct_url:
-                    if info.get("thumbnails"):
-                        direct_url = info["thumbnails"][-1].get("url")
-                        media_type = "image"
-                    elif info.get("url"):
-                        direct_url = info.get("url")
-                        if any(ext in direct_url.lower() for ext in [".jpg", ".jpeg", ".png", ".webp"]):
+                    # If no video format found, inspect thumbnails for photo / image posts
+                    if not direct_url:
+                        img_cand = None
+                        if info.get("thumbnails"):
+                            img_cand = info["thumbnails"][-1].get("url")
+                        elif info.get("url"):
+                            img_cand = info.get("url")
+
+                        if img_cand and audio_fmt:
+                            image_to_mix = img_cand
+                            audio_to_mix = audio_fmt["url"]
+                            media_type = "image_with_audio"
+                            logger.info(f"yt-dlp extracted image + audio track for mixing: {image_to_mix[:60]}")
+                        elif img_cand:
+                            direct_url = img_cand
                             media_type = "image"
 
-                if chosen_format and chosen_format.get("http_headers"):
-                    stream_headers.update(chosen_format["http_headers"])
-                elif info.get("http_headers"):
-                    stream_headers.update(info["http_headers"])
-                elif "instagram.com" in url.lower():
-                    stream_headers["Referer"] = "https://www.instagram.com/"
-                elif "tiktok.com" in url.lower():
-                    stream_headers["Referer"] = "https://www.tiktok.com/"
+                    if chosen_format and chosen_format.get("http_headers"):
+                        stream_headers.update(chosen_format["http_headers"])
+                    elif info.get("http_headers"):
+                        stream_headers.update(info["http_headers"])
+                    elif "instagram.com" in url.lower():
+                        stream_headers["Referer"] = "https://www.instagram.com/"
+                    elif "tiktok.com" in url.lower():
+                        stream_headers["Referer"] = "https://www.tiktok.com/"
+            except Exception as ydl_err:
+                logger.warning(f"Universal yt-dlp extractor notice: {ydl_err}")
+                if "instagram.com" in url.lower() and not direct_url and not (image_to_mix and audio_to_mix):
+                    ig_u, ig_mtype, ig_title, ig_thumb, ig_audio = extract_instagram_direct(url)
+                    if ig_u:
+                        direct_url = ig_u
+                        media_type = ig_mtype
+                        title = ig_title or title
+                        thumbnail_url = ig_thumb
+                        if ig_audio:
+                            image_to_mix = ig_u
+                            audio_to_mix = ig_audio
+                            media_type = "image_with_audio"
 
         # Double check media_type from URL if still marked video
         if direct_url and any(ext in direct_url.lower() for ext in [".jpg", ".jpeg", ".png", ".webp"]):
             media_type = "image"
 
-        if not direct_url:
+        if not direct_url and not (image_to_mix and audio_to_mix):
             edit_telegram_message(
                 chat_id,
                 status_msg_id,
@@ -637,47 +871,74 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
             )
             return
 
-        # 3. Download media stream into temporary file
-        edit_telegram_message(
-            chat_id,
-            status_msg_id,
-            f"📥 **Downloading {platform['emoji']} {platform['name']} {media_type}...**"
-        )
+        tmp_file = None
 
-        is_hls = ".m3u8" in direct_url
-        if is_hls and media_type == "video":
-            tmp_file = os.path.join(tempfile.gettempdir(), f"vid_{uuid.uuid4().hex[:6]}.mp4")
-            ydl_hls_opts = {
-                "quiet": True,
-                "no_warnings": True,
-                "format": "bestvideo/bv/best",
-                "outtmpl": tmp_file.replace(".mp4", "") + ".%(ext)s"
-            }
-            with yt_dlp.YoutubeDL(ydl_hls_opts) as ydl_hls:
-                ydl_hls.download([direct_url])
-            if not os.path.exists(tmp_file):
-                base = tmp_file.replace(".mp4", "")
-                for ext in [".mp4", ".mkv", ".ts"]:
-                    if os.path.exists(base + ext):
-                        tmp_file = base + ext
-                        break
-        else:
-            file_ext = ".jpg" if media_type == "image" else ".mp4"
-            tmp_file = os.path.join(tempfile.gettempdir(), f"media_{uuid.uuid4().hex[:6]}{file_ext}")
-            download_resp = requests.get(direct_url, headers=stream_headers, stream=True, timeout=30)
-            download_resp.raise_for_status()
+        # 3. Handle image with audio: Mix photo and audio track into an MP4 video!
+        if media_type == "image_with_audio" or (image_to_mix and audio_to_mix):
+            edit_telegram_message(
+                chat_id,
+                status_msg_id,
+                f"🎛️ **Detected photo with sound! Mixing photo & audio track...**"
+            )
+            mixed_mp4 = mix_image_and_audio(image_to_mix, audio_to_mix, headers=stream_headers)
+            if mixed_mp4 and os.path.exists(mixed_mp4):
+                tmp_file = mixed_mp4
+                media_type = "video"
+                thumbnail_url = image_to_mix
+            else:
+                # Fallback to image if mixing failed
+                direct_url = image_to_mix
+                media_type = "image"
 
-            total_bytes = 0
-            with open(tmp_file, "wb") as f:
-                for chunk in download_resp.iter_content(chunk_size=1024 * 256):
-                    if chunk:
-                        f.write(chunk)
-                        total_bytes += len(chunk)
-                        if total_bytes > 48 * 1024 * 1024:
+        # If not mixed, download the direct media stream
+        if not tmp_file:
+            edit_telegram_message(
+                chat_id,
+                status_msg_id,
+                f"📥 **Downloading {platform['emoji']} {platform['name']} {media_type}...**"
+            )
+
+            is_hls = ".m3u8" in direct_url
+            if is_hls and media_type == "video":
+                tmp_file = os.path.join(tempfile.gettempdir(), f"vid_{uuid.uuid4().hex[:6]}.mp4")
+                ydl_hls_opts = {
+                    "quiet": True,
+                    "no_warnings": True,
+                    "format": "bestvideo/bv/best",
+                    "outtmpl": tmp_file.replace(".mp4", "") + ".%(ext)s"
+                }
+                with yt_dlp.YoutubeDL(ydl_hls_opts) as ydl_hls:
+                    ydl_hls.download([direct_url])
+                if not os.path.exists(tmp_file):
+                    base = tmp_file.replace(".mp4", "")
+                    for ext in [".mp4", ".mkv", ".ts"]:
+                        if os.path.exists(base + ext):
+                            tmp_file = base + ext
                             break
+            else:
+                file_ext = ".jpg" if media_type == "image" else ".mp4"
+                tmp_file = os.path.join(tempfile.gettempdir(), f"media_{uuid.uuid4().hex[:6]}{file_ext}")
+                download_resp = requests.get(direct_url, headers=stream_headers, stream=True, timeout=30)
+                download_resp.raise_for_status()
 
-            if total_bytes > 48 * 1024 * 1024:
-                if os.path.exists(tmp_file):
+                total_bytes = 0
+                with open(tmp_file, "wb") as f:
+                    for chunk in download_resp.iter_content(chunk_size=1024 * 256):
+                        if chunk:
+                            f.write(chunk)
+                            total_bytes += len(chunk)
+                            if total_bytes > 48 * 1024 * 1024:
+                                break
+
+                if total_bytes > 48 * 1024 * 1024:
+                    if os.path.exists(tmp_file):
+                        os.remove(tmp_file)
+                    edit_telegram_message(
+                        chat_id,
+                        status_msg_id,
+                        f"⚠️ Media size ({total_bytes // (1024 * 1024)} MB) exceeds Telegram's 50 MB upload limit."
+                    )
+                    return
                     os.remove(tmp_file)
                 edit_telegram_message(
                     chat_id,
@@ -870,16 +1131,34 @@ class handler(BaseHTTPRequestHandler):
             platform = detect_platform(target_url)
             direct_url = None
             media_type = "video"
+            image_to_mix = None
+            audio_to_mix = None
             stream_headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             }
 
             if platform.get("name") == "TikTok":
-                tk_play, tk_hd, _, _, _ = extract_tiktok_direct(target_url)
+                tk_play, tk_hd, _, _, _, tk_img, tk_music = extract_tiktok_direct(target_url)
                 if q_height and q_height >= 1080 and tk_hd:
                     direct_url = tk_hd
                 elif tk_play:
                     direct_url = tk_play
+                elif tk_img and tk_music:
+                    image_to_mix = tk_img
+                    audio_to_mix = tk_music
+                    media_type = "image_with_audio"
+                elif tk_img:
+                    direct_url = tk_img
+                    media_type = "image"
+            elif platform.get("name") == "Instagram":
+                ig_u, ig_mtype, _, _, ig_audio = extract_instagram_direct(target_url)
+                if ig_u:
+                    direct_url = ig_u
+                    media_type = ig_mtype
+                    if ig_audio:
+                        image_to_mix = ig_u
+                        audio_to_mix = ig_audio
+                        media_type = "image_with_audio"
             elif platform.get("name") == "Snapchat":
                 snap_u, _, _ = extract_snapchat_direct(target_url)
                 if snap_u:
@@ -890,7 +1169,7 @@ class handler(BaseHTTPRequestHandler):
                     direct_url = pin_u
                     media_type = pin_mtype or "video"
 
-            if not direct_url:
+            if not direct_url and not (image_to_mix and audio_to_mix):
                 try:
                     fmt_str = (
                         f"best[height<={q_height}][ext=mp4][acodec!=none]/best[height<={q_height}][ext=mp4]/best[height<={q_height}]/best/bestvideo/bv/b"
@@ -914,6 +1193,7 @@ class handler(BaseHTTPRequestHandler):
                             info = info["entries"][0]
 
                     chosen_format = None
+                    audio_fmt = None
                     if info:
                         if "formats" in info and info["formats"]:
                             if q_height:
@@ -934,14 +1214,26 @@ class handler(BaseHTTPRequestHandler):
                                         chosen_format = f
                                         direct_url = f["url"]
                                         break
+                            for f in reversed(info["formats"]):
+                                if f.get("url") and f.get("acodec") != "none":
+                                    audio_fmt = f
+                                    break
 
                         # If no video stream, check for image/photo thumbnails (Instagram, Pinterest, X)
                         if not direct_url:
+                            img_cand = None
                             if info.get("thumbnails"):
-                                direct_url = info["thumbnails"][-1].get("url")
-                                media_type = "image"
+                                img_cand = info["thumbnails"][-1].get("url")
                             elif info.get("url"):
-                                direct_url = info.get("url")
+                                img_cand = info.get("url")
+
+                            if img_cand and audio_fmt:
+                                image_to_mix = img_cand
+                                audio_to_mix = audio_fmt["url"]
+                                media_type = "image_with_audio"
+                            elif img_cand:
+                                direct_url = img_cand
+                                media_type = "image"
 
                         if chosen_format and chosen_format.get("http_headers"):
                             stream_headers.update(chosen_format["http_headers"])
@@ -953,6 +1245,37 @@ class handler(BaseHTTPRequestHandler):
                             stream_headers["Referer"] = "https://www.tiktok.com/"
                 except Exception as ydl_err:
                     logger.warning(f"yt-dlp extraction failed: {ydl_err}")
+                    if "instagram.com" in target_url.lower() and not direct_url and not (image_to_mix and audio_to_mix):
+                        ig_u, ig_mtype, _, _, ig_audio = extract_instagram_direct(target_url)
+                        if ig_u:
+                            direct_url = ig_u
+                            media_type = ig_mtype
+                            if ig_audio:
+                                image_to_mix = ig_u
+                                audio_to_mix = ig_audio
+                                media_type = "image_with_audio"
+
+            # If image with audio: Mix photo and audio track into an MP4 and stream directly to iOS!
+            if (media_type == "image_with_audio" or (image_to_mix and audio_to_mix)) and not direct_url:
+                mixed_file = mix_image_and_audio(image_to_mix, audio_to_mix, headers=stream_headers)
+                if mixed_file and os.path.exists(mixed_file):
+                    with open(mixed_file, "rb") as vf:
+                        v_data = vf.read()
+                    try:
+                        os.remove(mixed_file)
+                    except Exception:
+                        pass
+                    self.send_response(200)
+                    self.send_header("Content-Type", "video/mp4")
+                    self.send_header("Content-Disposition", 'attachment; filename="audio_photo.mp4"')
+                    self.send_header("Content-Length", str(len(v_data)))
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.end_headers()
+                    self.wfile.write(v_data)
+                    return
+                elif image_to_mix:
+                    direct_url = image_to_mix
+                    media_type = "image"
 
             if not direct_url:
                 self._send_json(404, {"error": "Could not extract media stream from URL"})
