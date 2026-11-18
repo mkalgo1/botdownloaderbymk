@@ -136,6 +136,7 @@ def extract_mp4_dimensions(file_path: str):
     """
     Extracts the exact native visual width and height of an MP4 file
     by reading track header (tkhd) boxes inside the moov atom.
+    Accurately detects display transformation matrix rotation (90/270 deg).
     Works for all platforms (TikTok, Instagram, Snapchat, YouTube, etc.)
     in under 2 milliseconds without FFmpeg or OpenCV.
     """
@@ -154,6 +155,12 @@ def extract_mp4_dimensions(file_path: str):
                         w_raw, h_raw = struct.unpack(">II", data[pos - 4 + box_size - 8 : pos - 4 + box_size])
                         w = w_raw >> 16
                         h = h_raw >> 16
+                        # Check transformation matrix (36 bytes prior to width/height)
+                        if pos - 4 + box_size - 44 >= 0:
+                            matrix = struct.unpack(">9i", data[pos - 4 + box_size - 44 : pos - 4 + box_size - 8])
+                            # matrix[1] (b) or matrix[3] (c) non-zero indicates 90 or 270 degree rotation
+                            if matrix[1] != 0 or matrix[3] != 0:
+                                w, h = h, w
                         if w > 0 and h > 0:
                             width, height = w, h
                             break
@@ -175,6 +182,10 @@ def extract_mp4_dimensions(file_path: str):
                                 w_raw, h_raw = struct.unpack(">II", data_end[pos - 4 + box_size - 8 : pos - 4 + box_size])
                                 w = w_raw >> 16
                                 h = h_raw >> 16
+                                if pos - 4 + box_size - 44 >= 0:
+                                    matrix = struct.unpack(">9i", data_end[pos - 4 + box_size - 44 : pos - 4 + box_size - 8])
+                                    if matrix[1] != 0 or matrix[3] != 0:
+                                        w, h = h, w
                                 if w > 0 and h > 0:
                                     width, height = w, h
                                     break
@@ -182,6 +193,53 @@ def extract_mp4_dimensions(file_path: str):
     except Exception as e:
         logger.warning(f"Could not parse MP4 dimensions: {e}")
     return width, height
+
+
+def get_video_info_fast(file_path: str):
+    """
+    Extracts display width, height, and duration with rotation normalization.
+    Uses FFprobe/FFmpeg if available; falls back to fast MP4 box inspection.
+    """
+    try:
+        ffmpeg_bin = ensure_ffmpeg()
+        ffprobe_bin = shutil.which("ffprobe")
+        if not ffprobe_bin and ffmpeg_bin:
+            cand = os.path.join(os.path.dirname(ffmpeg_bin), "ffprobe")
+            if os.path.exists(cand):
+                ffprobe_bin = cand
+
+        if ffprobe_bin:
+            cmd = [ffprobe_bin, "-v", "quiet", "-print_format", "json", "-show_streams", "-show_format", file_path]
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=6)
+            if res.returncode == 0:
+                data = json.loads(res.stdout)
+                for s in data.get("streams", []):
+                    if s.get("codec_type") == "video":
+                        w = int(s.get("width", 0))
+                        h = int(s.get("height", 0))
+                        rot = 0
+                        if s.get("tags", {}).get("rotate"):
+                            try:
+                                rot = int(s["tags"]["rotate"])
+                            except Exception:
+                                pass
+                        for sd in s.get("side_data_list", []):
+                            if "rotation" in sd:
+                                try:
+                                    rot = int(sd["rotation"])
+                                except Exception:
+                                    pass
+                        if rot in [90, 270, -90, -270]:
+                            w, h = h, w
+                        dur = float(s.get("duration") or data.get("format", {}).get("duration") or 0)
+                        if w > 0 and h > 0:
+                            return w, h, int(dur)
+    except Exception as e:
+        logger.warning(f"get_video_info_fast warning: {e}")
+
+    # Fallback to pure Python MP4 atom inspection
+    w, h = extract_mp4_dimensions(file_path)
+    return w, h, 0
 
 
 def ensure_ffmpeg() -> str:
@@ -359,24 +417,33 @@ def extract_instagram_direct(url: str):
 
 
 def extract_tiktok_direct(url: str):
-    try:
-        api_url = f"https://tikwm.com/api/?url={urllib.parse.quote(url, safe=':/?=&')}"
-        req = requests.get(api_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}, timeout=10)
-        if req.status_code == 200:
-            data = req.json()
-            if data.get("code") == 0 and data.get("data"):
-                d = data["data"]
-                play_url = d.get("play") or d.get("wmplay")
-                hd_url = d.get("hdplay")
-                title = d.get("title") or "TikTok Video"
-                duration = d.get("duration", 0)
-                cover_url = d.get("cover") or d.get("origin_cover")
-                music_url = d.get("music") or (d.get("music_info") or {}).get("play")
-                images = d.get("images") or []
-                image_url = images[0] if images else None
-                return play_url, hd_url, title, duration, cover_url, image_url, music_url
-    except Exception as e:
-        logger.warning(f"TikWM extraction failed: {e}")
+    endpoints = [
+        f"https://tikwm.com/api/?url={urllib.parse.quote(url, safe=':/?=&')}",
+        f"https://www.tikwm.com/api/?url={urllib.parse.quote(url, safe=':/?=&')}",
+    ]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+    }
+    for api_url in endpoints:
+        try:
+            req = requests.get(api_url, headers=headers, timeout=8)
+            if req.status_code == 200:
+                data = req.json()
+                if data.get("code") == 0 and data.get("data"):
+                    d = data["data"]
+                    play_url = d.get("play") or d.get("wmplay")
+                    hd_url = d.get("hdplay")
+                    title = d.get("title") or "TikTok Video"
+                    duration = d.get("duration", 0)
+                    cover_url = d.get("cover") or d.get("origin_cover")
+                    music_url = d.get("music") or (d.get("music_info") or {}).get("play")
+                    images = d.get("images") or []
+                    image_url = images[0] if images else None
+                    if play_url or image_url:
+                        return play_url, hd_url, title, duration, cover_url, image_url, music_url
+        except Exception as e:
+            logger.warning(f"TikWM endpoint {api_url[:30]} failed: {e}")
     return None, None, None, None, None, None, None
 
 
@@ -918,27 +985,57 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
             else:
                 file_ext = ".jpg" if media_type == "image" else ".mp4"
                 tmp_file = os.path.join(tempfile.gettempdir(), f"media_{uuid.uuid4().hex[:6]}{file_ext}")
-                download_resp = requests.get(direct_url, headers=stream_headers, stream=True, timeout=30)
-                download_resp.raise_for_status()
+                is_protected_tiktok = platform.get("name") == "TikTok" and direct_url and ("v19-webapp" in direct_url or "tiktok.com/video/" in direct_url)
+                
+                downloaded = False
+                if not is_protected_tiktok:
+                    try:
+                        download_resp = requests.get(direct_url, headers=stream_headers, stream=True, timeout=30)
+                        download_resp.raise_for_status()
 
-                total_bytes = 0
-                with open(tmp_file, "wb") as f:
-                    for chunk in download_resp.iter_content(chunk_size=1024 * 256):
-                        if chunk:
-                            f.write(chunk)
-                            total_bytes += len(chunk)
-                            if total_bytes > 48 * 1024 * 1024:
-                                break
+                        total_bytes = 0
+                        with open(tmp_file, "wb") as f:
+                            for chunk in download_resp.iter_content(chunk_size=1024 * 256):
+                                if chunk:
+                                    f.write(chunk)
+                                    total_bytes += len(chunk)
+                                    if total_bytes > 48 * 1024 * 1024:
+                                        break
 
-                if total_bytes > 48 * 1024 * 1024:
-                    if os.path.exists(tmp_file):
-                        os.remove(tmp_file)
-                    edit_telegram_message(
-                        chat_id,
-                        status_msg_id,
-                        f"⚠️ Media size ({total_bytes // (1024 * 1024)} MB) exceeds Telegram's 50 MB upload limit."
-                    )
-                    return
+                        if total_bytes > 48 * 1024 * 1024:
+                            if os.path.exists(tmp_file):
+                                os.remove(tmp_file)
+                            edit_telegram_message(
+                                chat_id,
+                                status_msg_id,
+                                f"⚠️ Media size ({total_bytes // (1024 * 1024)} MB) exceeds Telegram's 50 MB upload limit."
+                            )
+                            return
+                        if os.path.exists(tmp_file) and os.path.getsize(tmp_file) > 100:
+                            downloaded = True
+                    except Exception as dl_err:
+                        logger.warning(f"Direct stream download failed ({dl_err}); falling back to yt-dlp native download")
+
+                # Fallback to yt-dlp native download if requests failed or protected CDN
+                if not downloaded and media_type == "video":
+                    try:
+                        ydl_down_opts = {
+                            "quiet": True,
+                            "no_warnings": True,
+                            "noplaylist": True,
+                            "format": "bestvideo+bestaudio/best[ext=mp4]/best",
+                            "outtmpl": tmp_file.replace(".mp4", "") + ".%(ext)s"
+                        }
+                        with yt_dlp.YoutubeDL(ydl_down_opts) as ydl_down:
+                            ydl_down.download([url])
+                        if not os.path.exists(tmp_file):
+                            base = tmp_file.replace(".mp4", "")
+                            for ext in [".mp4", ".mkv", ".webm", ".ts"]:
+                                if os.path.exists(base + ext):
+                                    tmp_file = base + ext
+                                    break
+                    except Exception as ydl_down_err:
+                        logger.warning(f"yt-dlp fallback download failed: {ydl_down_err}")
 
         if not os.path.exists(tmp_file) or os.path.getsize(tmp_file) == 0:
             edit_telegram_message(
@@ -957,7 +1054,45 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
         elif len(header_sample) >= 8 and header_sample[4:8] == b"ftyp":
             media_type = "video"
 
-        # 5. Upload to Telegram (Photo vs Video)
+        # 5. Faststart conversion & video metadata inspection
+        final_video_file = tmp_file
+        thumb_bytes = None
+        created_temp_files = [tmp_file]
+
+        if media_type == "video":
+            ffmpeg_bin = ensure_ffmpeg()
+            if ffmpeg_bin and os.path.exists(tmp_file) and os.path.getsize(tmp_file) > 0:
+                # Apply faststart: moves moov atom to front for instant streaming without download prompts
+                fast_out = os.path.join(tempfile.gettempdir(), f"fast_{uuid.uuid4().hex[:6]}.mp4")
+                try:
+                    cmd_fast = [ffmpeg_bin, "-y", "-i", tmp_file, "-c", "copy", "-movflags", "+faststart", fast_out]
+                    res_fast = subprocess.run(cmd_fast, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+                    if res_fast.returncode == 0 and os.path.exists(fast_out) and os.path.getsize(fast_out) > 0:
+                        final_video_file = fast_out
+                        created_temp_files.append(fast_out)
+                except Exception as fe:
+                    logger.warning(f"Faststart remux warning: {fe}")
+
+                # Extract 1 frame directly from the actual video to guarantee 100% matching aspect ratio & orientation
+                th_out = os.path.join(tempfile.gettempdir(), f"th_{uuid.uuid4().hex[:6]}.jpg")
+                try:
+                    cmd_th = [ffmpeg_bin, "-y", "-ss", "00:00:00.200", "-i", final_video_file, "-vframes", "1", "-q:v", "2", th_out]
+                    res_th = subprocess.run(cmd_th, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+                    if res_th.returncode == 0 and os.path.exists(th_out) and os.path.getsize(th_out) > 100:
+                        with open(th_out, "rb") as tf:
+                            thumb_bytes = tf.read()
+                        created_temp_files.append(th_out)
+                except Exception as te:
+                    logger.warning(f"Frame thumbnail extraction warning: {te}")
+
+            # Inspect display dimensions & duration
+            vid_w, vid_h, vid_d = get_video_info_fast(final_video_file)
+            if vid_w and vid_h:
+                vid_width, vid_height = vid_w, vid_h
+            if vid_d:
+                duration = vid_d
+
+        # 6. Upload to Telegram (Photo vs Video)
         if media_type == "image":
             edit_telegram_message(
                 chat_id,
@@ -973,21 +1108,6 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
                     timeout=40
                 )
         else:
-            # Inspect exact native dimensions from MP4 file header
-            extracted_w, extracted_h = extract_mp4_dimensions(tmp_file)
-            if extracted_w and extracted_h:
-                vid_width, vid_height = extracted_w, extracted_h
-                logger.info(f"Detected native MP4 dimensions: {vid_width}x{vid_height}")
-
-            thumb_bytes = None
-            if thumbnail_url:
-                try:
-                    r_th = requests.get(thumbnail_url, headers=stream_headers, timeout=6)
-                    if r_th.status_code == 200 and len(r_th.content) > 100:
-                        thumb_bytes = r_th.content
-                except Exception as e:
-                    logger.warning(f"Failed to fetch thumbnail: {e}")
-
             edit_telegram_message(
                 chat_id,
                 status_msg_id,
@@ -997,7 +1117,7 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
             send_data = {
                 "chat_id": chat_id,
                 "caption": caption_text,
-                "supports_streaming": "true",
+                "supports_streaming": True,
             }
             if duration:
                 send_data["duration"] = int(duration)
@@ -1005,9 +1125,9 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
                 send_data["width"] = int(vid_width)
                 send_data["height"] = int(vid_height)
 
-            files = {"video": (os.path.basename(tmp_file), None, "video/mp4")}
-            with open(tmp_file, "rb") as vf:
-                files["video"] = (os.path.basename(tmp_file), vf, "video/mp4")
+            files = {"video": (os.path.basename(final_video_file), None, "video/mp4")}
+            with open(final_video_file, "rb") as vf:
+                files["video"] = (os.path.basename(final_video_file), vf, "video/mp4")
                 if thumb_bytes:
                     files["thumbnail"] = ("thumb.jpg", thumb_bytes, "image/jpeg")
 
@@ -1018,10 +1138,12 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
                     timeout=50
                 )
 
-        try:
-            os.remove(tmp_file)
-        except Exception:
-            pass
+        for cf in created_temp_files:
+            try:
+                if os.path.exists(cf):
+                    os.remove(cf)
+            except Exception:
+                pass
 
         upload_data = upload_res.json()
         logger.info(f"Telegram upload result: {upload_data.get('ok')} - desc: {upload_data.get('description')}")
@@ -1293,25 +1415,29 @@ class handler(BaseHTTPRequestHandler):
                 })
                 return
 
-            # Special handling for HLS (.m3u8) streams (like Pinterest story videos):
+            # Special handling for HLS (.m3u8) streams or protected TikTok streams:
+            # TikTok internal CDN links (v19-webapp-prime) require cookies and return 403 to iOS Shortcuts.
             # Apple Shortcuts 'Get Contents of URL' downloads .m3u8 as a text file which Photos cannot save.
-            # Convert fragments to a real MP4 on the fly and stream directly to iOS if <= 4.5 MB!
-            if ".m3u8" in direct_url and media_type == "video":
+            # In these cases, download or convert to MP4 directly on the server and stream directly to iOS if <= 4.5 MB!
+            is_protected_tiktok = platform.get("name") == "TikTok" and direct_url and ("v19-webapp" in direct_url or "tiktok.com/video/" in direct_url)
+            is_hls = direct_url and ".m3u8" in direct_url
+
+            if (is_hls or is_protected_tiktok) and media_type == "video":
                 try:
-                    tmp_hls = os.path.join(tempfile.gettempdir(), f"stream_{uuid.uuid4().hex[:6]}.mp4")
-                    ydl_hls_opts = {
+                    tmp_stream = os.path.join(tempfile.gettempdir(), f"stream_{uuid.uuid4().hex[:6]}.mp4")
+                    ydl_stream_opts = {
                         "quiet": True,
                         "no_warnings": True,
-                        "format": "bestvideo/bv/best",
-                        "outtmpl": tmp_hls.replace(".mp4", "") + ".%(ext)s"
+                        "format": "bestvideo+bestaudio/best[ext=mp4]/best",
+                        "outtmpl": tmp_stream.replace(".mp4", "") + ".%(ext)s"
                     }
-                    with yt_dlp.YoutubeDL(ydl_hls_opts) as ydl_h:
-                        ydl_h.download([direct_url])
+                    with yt_dlp.YoutubeDL(ydl_stream_opts) as ydl_s:
+                        ydl_s.download([target_url if is_protected_tiktok else direct_url])
 
-                    real_mp4 = tmp_hls
+                    real_mp4 = tmp_stream
                     if not os.path.exists(real_mp4):
-                        base = tmp_hls.replace(".mp4", "")
-                        for ext in [".mp4", ".mkv", ".ts"]:
+                        base = tmp_stream.replace(".mp4", "")
+                        for ext in [".mp4", ".mkv", ".ts", ".webm"]:
                             if os.path.exists(base + ext):
                                 real_mp4 = base + ext
                                 break
@@ -1327,14 +1453,14 @@ class handler(BaseHTTPRequestHandler):
                                 pass
                             self.send_response(200)
                             self.send_header("Content-Type", "video/mp4")
-                            self.send_header("Content-Disposition", 'attachment; filename="pinterest_video.mp4"')
+                            self.send_header("Content-Disposition", 'attachment; filename="media.mp4"')
                             self.send_header("Content-Length", str(len(v_data)))
                             self.send_header("Access-Control-Allow-Origin", "*")
                             self.end_headers()
                             self.wfile.write(v_data)
                             return
-                except Exception as hls_err:
-                    logger.warning(f"Failed to stream converted HLS: {hls_err}")
+                except Exception as s_err:
+                    logger.warning(f"Failed to stream converted/downloaded video: {s_err}")
 
             # Direct 302 Redirect to high-speed CDN URL (Photos, Videos)
             # Apple Shortcuts 'Get Contents of URL' follows 302 redirects automatically and saves directly to Photos!
