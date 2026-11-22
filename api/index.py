@@ -22,7 +22,9 @@ import yt_dlp
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s]: %(message)s")
 logger = logging.getLogger("VercelBot")
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "9134223706:AAGW202tOsHstyIxIUOdyjkRKdflccs8S6s")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+if not BOT_TOKEN:
+    logger.warning("BOT_TOKEN environment variable is missing! Configure BOT_TOKEN in project settings.")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 URL_REGEX = re.compile(r"https?://(?:www\.)?\S+", re.IGNORECASE)
 USER_CHAT_ID = 2140565223

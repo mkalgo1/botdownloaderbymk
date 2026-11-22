@@ -56,7 +56,7 @@ A high-performance Telegram bot that **automatically monitors specified Facebook
 ## 🛠️ Configuration (`.env`)
 
 ```env
-BOT_TOKEN=9167130801:AAHTYJHwsVzZfJrMkTeH3V0lah2HXVDOJcE
+BOT_TOKEN=your_telegram_bot_token_here
 PORT=8080
 CHECK_INTERVAL_SECONDS=360
 TARGET_CHAT_ID=
