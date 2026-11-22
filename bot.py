@@ -352,35 +352,63 @@ async def cmd_pages(msg: Message):
     await msg.reply(f"📋 **Monitored Facebook Pages ({len(fb_monitor.pages)}):**\n\n{pages_list}")
 
 
-@dp.message(Command("addpage"))
+LOCAL_USER_STATES = {}
+
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(msg: Message):
+    if msg.chat.id in LOCAL_USER_STATES:
+        LOCAL_USER_STATES.pop(msg.chat.id, None)
+        await msg.reply("❌ Operation cancelled.")
+
+
+@dp.message(Command("add", "addpage"))
 async def cmd_addpage(msg: Message):
+    from api.index import resolve_facebook_page
     parts = msg.text.split(maxsplit=1)
-    if len(parts) < 2:
-        await msg.reply("⚠️ Usage: `/addpage https://web.facebook.com/...`")
-        return
-    page_url = parts[1].strip()
-    if not ("facebook.com" in page_url.lower() or "fb.watch" in page_url.lower()):
-        await msg.reply("❌ Invalid URL. Please provide a valid Facebook page or profile link.")
-        return
-    added = fb_monitor.add_page(page_url)
-    if added:
-        await msg.reply(f"✅ Added page to monitor:\n`{page_url}`")
+    if len(parts) > 1:
+        raw_input = parts[1].strip()
+        status_msg = await msg.reply("🔍 **Detecting Facebook page credentials...**")
+        p_url, p_name, err = await asyncio.to_thread(resolve_facebook_page, raw_input)
+        if p_url:
+            fb_monitor.add_page(p_url)
+            pages_list = "\n".join([f"{idx+1}. `{p}`" for idx, p in enumerate(fb_monitor.pages)])
+            await status_msg.edit_text(
+                f"✅ **Successfully Added to Auto-Grab Monitor!**\n\n"
+                f"📘 **Page Name:** *{p_name}*\n"
+                f"🔗 **Page URL:** `{p_url}`\n\n"
+                f"Whenever a new video or reel is uploaded, it will be automatically delivered here in HD!\n\n"
+                f"📋 **Monitored Pages ({len(fb_monitor.pages)}):**\n{pages_list}"
+            )
+        else:
+            await status_msg.edit_text(f"❌ Could not detect Facebook page credentials.\nDetail: {err or 'Invalid link or username'}")
     else:
-        await msg.reply("ℹ️ This page is already in the monitor list.")
+        LOCAL_USER_STATES[msg.chat.id] = "awaiting_add_page"
+        await msg.reply(
+            "➕ **Add Facebook Page to Auto-Grab Monitor**\n\n"
+            "What page would you like to add to the auto-grab list? You can reply with:\n\n"
+            "1️⃣ **Page Link:** e.g. `https://facebook.com/pagename`\n"
+            "2️⃣ **Page Username / Slug:** e.g. `lavialyon` or `@lavialyon`\n"
+            "3️⃣ **Any Video / Reel Link from that page:** e.g. `https://facebook.com/reel/123456...`\n"
+            "    *(The bot will automatically detect the creator page credentials!)*\n\n"
+            "👉 *Send your page or video link now, or send `/cancel` to abort.*"
+        )
 
 
-@dp.message(Command("delpage"))
+@dp.message(Command("del", "delpage"))
 async def cmd_delpage(msg: Message):
     parts = msg.text.split(maxsplit=1)
-    if len(parts) < 2:
-        await msg.reply("⚠️ Usage: `/delpage <url or id>`")
-        return
-    target = parts[1].strip()
-    removed = fb_monitor.remove_page(target)
-    if removed:
-        await msg.reply(f"🗑 Removed page from monitor: `{target}`")
+    if len(parts) > 1:
+        target = parts[1].strip()
+        removed = fb_monitor.remove_page(target)
+        if removed:
+            pages_list = "\n".join([f"{idx+1}. `{p}`" for idx, p in enumerate(fb_monitor.pages)])
+            await msg.reply(f"🗑 Removed page from monitor: `{target}`\n\n📋 **Remaining ({len(fb_monitor.pages)}):**\n{pages_list}")
+        else:
+            await msg.reply(f"❌ Could not find a matching page to remove.")
     else:
-        await msg.reply("❌ Could not find a matching page to remove.")
+        pages_list = "\n".join([f"{idx+1}. `{p}`" for idx, p in enumerate(fb_monitor.pages)])
+        await msg.reply(f"🗑 **Remove a Monitored Page**\n\nSend `/del <number>` to remove a page:\n\n{pages_list}")
 
 
 # -------------------------------------------------------------------
@@ -388,6 +416,25 @@ async def cmd_delpage(msg: Message):
 # -------------------------------------------------------------------
 @dp.message(F.text)
 async def process_link(msg: Message):
+    if LOCAL_USER_STATES.get(msg.chat.id) == "awaiting_add_page":
+        LOCAL_USER_STATES.pop(msg.chat.id, None)
+        from api.index import resolve_facebook_page
+        status_msg = await msg.reply("🔍 **Detecting Facebook page credentials from your input...**")
+        p_url, p_name, err = await asyncio.to_thread(resolve_facebook_page, msg.text)
+        if p_url:
+            fb_monitor.add_page(p_url)
+            pages_list = "\n".join([f"{idx+1}. `{p}`" for idx, p in enumerate(fb_monitor.pages)])
+            await status_msg.edit_text(
+                f"✅ **Successfully Added to Auto-Grab Monitor!**\n\n"
+                f"📘 **Page Name:** *{p_name}*\n"
+                f"🔗 **Page URL:** `{p_url}`\n\n"
+                f"Whenever a new video or reel is uploaded, it will be automatically delivered here in HD!\n\n"
+                f"📋 **Monitored Pages ({len(fb_monitor.pages)}):**\n{pages_list}"
+            )
+        else:
+            await status_msg.edit_text(f"❌ Could not detect Facebook page credentials.\nDetail: {err or 'Invalid link or username'}")
+        return
+
     match = URL_REGEX.search(msg.text)
     if not match:
         return
