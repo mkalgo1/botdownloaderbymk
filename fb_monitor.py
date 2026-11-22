@@ -300,7 +300,7 @@ class FacebookMonitor:
         
         ydl_opts = {
             "outtmpl": out_tmpl,
-            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "format": "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[vcodec^=h264]+bestaudio/best[vcodec^=avc1]/best[vcodec^=h264]/hd/sd/best[ext=mp4]/best",
             "merge_output_format": "mp4",
             "noplaylist": True,
             "quiet": True,

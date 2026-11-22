@@ -1032,7 +1032,7 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
                     "no_warnings": True,
                     "noplaylist": True,
                     "ignore_no_formats_error": True,
-                    "format": "bestvideo+bestaudio/best[ext=mp4][acodec!=none]/best[ext=mp4]/best/bestvideo/bv/b",
+                    "format": "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[vcodec^=h264]+bestaudio/best[vcodec^=avc1]/best[vcodec^=h264]/hd/sd/best[ext=mp4]/best",
                     "http_headers": {
                         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -1059,12 +1059,23 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
                     chosen_format = None
                     audio_fmt = None
                     if "formats" in info and info["formats"]:
+                        # 1. Prioritize native H.264/AVC1 streams or Facebook HD/SD progressive streams
                         for f in reversed(info["formats"]):
-                            if f.get("url") and f.get("ext") == "mp4" and f.get("vcodec") != "none" and f.get("acodec") != "none":
+                            fid = str(f.get("format_id", "")).lower()
+                            vc = str(f.get("vcodec", "")).lower()
+                            if f.get("url") and (fid in ["hd", "sd"] or vc.startswith(("avc1", "h264"))):
                                 chosen_format = f
                                 direct_url = f["url"]
                                 media_type = "video"
                                 break
+                        # 2. Next, any MP4 stream with both video and audio
+                        if not direct_url:
+                            for f in reversed(info["formats"]):
+                                if f.get("url") and f.get("ext") == "mp4" and f.get("vcodec") != "none" and f.get("acodec") != "none":
+                                    chosen_format = f
+                                    direct_url = f["url"]
+                                    media_type = "video"
+                                    break
                         if not direct_url:
                             for f in reversed(info["formats"]):
                                 if f.get("url") and (f.get("ext") == "mp4" or f.get("vcodec") != "none"):
@@ -1213,7 +1224,7 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
                             "quiet": True,
                             "no_warnings": True,
                             "noplaylist": True,
-                            "format": "bestvideo+bestaudio/best[ext=mp4]/best",
+                            "format": "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[vcodec^=h264]+bestaudio/best[vcodec^=avc1]/best[vcodec^=h264]/hd/sd/best[ext=mp4]/best",
                             "outtmpl": tmp_file.replace(".mp4", "") + ".%(ext)s"
                         }
                         with yt_dlp.YoutubeDL(ydl_down_opts) as ydl_down:
@@ -1624,7 +1635,7 @@ class handler(BaseHTTPRequestHandler):
                     ydl_stream_opts = {
                         "quiet": True,
                         "no_warnings": True,
-                        "format": "bestvideo+bestaudio/best[ext=mp4]/best",
+                        "format": "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[vcodec^=h264]+bestaudio/best[vcodec^=avc1]/best[vcodec^=h264]/hd/sd/best[ext=mp4]/best",
                         "outtmpl": tmp_stream.replace(".mp4", "") + ".%(ext)s"
                     }
                     with yt_dlp.YoutubeDL(ydl_stream_opts) as ydl_s:
