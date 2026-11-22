@@ -1,72 +1,90 @@
-# Telegram Universal Video Downloader Bot ⚡
+# Universal Media Downloader & Facebook Page Auto-Checker Bot ⚡
 
-A high-performance Telegram bot that downloads public videos from 1,500+ platforms with automatic platform detection, adaptive FFmpeg compression (<50 MB), and 24/7 serverless & cloud keep-alive support.
+A high-performance Telegram bot that **automatically monitors specified Facebook pages for new video/reel/photo uploads and downloads them directly into your Telegram chat**, while also serving as a universal on-demand media downloader for 1,500+ platforms (Instagram, TikTok, YouTube, Reddit, Pinterest, etc.).
 
 ---
 
 ## 🚀 Key Features
 
-- **Automatic Platform Detection:** Detects and flags incoming URLs instantly:
-  - 📸 **Instagram** (Reels, Posts, Stories)
-  - 🎵 **TikTok** (No watermark)
-  - 🔴 **YouTube** (Shorts & Standard Videos)
-  - 🐦 **X (Twitter)** Media
-  - 👽 **Reddit** Video Streams
-  - 📘 **Facebook** Videos
-  - 🟣 **Twitch, Pinterest, Vimeo**, and 1,500+ more
-- **Dual Deployment Ready:**
-  - **Vercel Serverless (Webhooks):** 24/7 serverless zero-maintenance bot.
-  - **Docker / Render (Long Polling):** Full containerized deployment with FFmpeg adaptive compression for massive files.
-- **24/7 Keep-Alive HTTP Ping Server:** Active ping and healthcheck endpoints.
+1. **Automated Facebook Page & Profile Checker:**
+   - Automatically polls monitored Facebook pages:
+     - `https://web.facebook.com/profile.php?id=61556328743295` (Paris France Tour)
+     - `https://web.facebook.com/profile.php?id=100083193627339` (FX France Express)
+     - `https://web.facebook.com/lavialyon` (La vie à Lyon France)
+   - Discovers new Reels, Videos, and Photos immediately upon upload.
+   - Automatically downloads the highest quality stream and pushes it directly into your Telegram bot chat with title, description, and source link!
+
+2. **Advanced Anti-Bot Block Protection (Long-Term Reliability):**
+   - **Browser TLS Fingerprint Impersonation:** Emulates real Chrome (`chrome120`, `chrome119`) and Safari desktop TLS handshakes using `curl_cffi`, completely bypassing Facebook's anti-bot blocks.
+   - **Human Jitter & Polite Pacing:** Randomizes delays (5-14s between pages, ±60s between polling loops) to eliminate automated periodic signatures.
+   - **Exponential Backoff:** Gracefully pauses (up to 25 mins) if Facebook issues a 429 rate limit or challenge, preventing account or IP flags.
+   - **Persistent Deduplication DB (`seen_posts.json`):** Tracks post IDs and canonical links so duplicate posts are never sent or re-downloaded.
+   - **Optional Cookies Support (`cookies.txt` / `FB_COOKIES_FILE`):** Supports authenticated session cookies if needed.
+
+3. **Media Processing & Telegram Optimization:**
+   - **Faststart Streaming (`-movflags +faststart`):** Remuxes MP4 containers so videos stream immediately without waiting for full buffer.
+   - **Exact Frame Thumbnailing:** Captures a frame at `00:00:00.200` to ensure preview aspect ratios in Telegram match the source video.
+   - **Adaptive Compression:** If a video exceeds Telegram's 50 MB limit, compresses it automatically to fit within limits.
+
+4. **Universal On-Demand Downloader:**
+   - Send or paste any link into the bot chat to download media on demand:
+     - 📸 **Instagram** (Reels, Posts, Stories)
+     - 🎵 **TikTok** (No watermark)
+     - 🔴 **YouTube** (Shorts & Standard Videos)
+     - 🐦 **X (Twitter)** Media
+     - 👽 **Reddit** Clips
+     - 📘 **Facebook** Videos & Reels
+     - 📌 **Pinterest**, Twitch, Vimeo, etc.
 
 ---
 
-## 🌐 Live URLs & Ping Endpoint
+## 🤖 Telegram Bot & Commands
 
-- **Vercel Production URL:** `https://botdownloaderbymk.vercel.app`
-- **Ping URL (Keep-Alive):** `https://botdownloaderbymk.vercel.app/ping`
-- **Health Check URL:** `https://botdownloaderbymk.vercel.app/health`
-- **Telegram Webhook Endpoint:** `https://botdownloaderbymk.vercel.app/api/webhook`
-- **One-Click Webhook Setup:** `https://botdownloaderbymk.vercel.app/setup`
+**Bot Username:** `@fbdownloaderpagesvidsbot`
 
-### How to Keep the Bot Awake 24/7:
-1. Open [UptimeRobot](https://uptimerobot.com) or [cron-job.org](https://cron-job.org).
-2. Create an HTTP monitor pointing to:
-   `https://botdownloaderbymk.vercel.app/ping`
-3. Set interval to **5 or 10 minutes**.
-
----
-
-## 🛠️ Deploying & Updating on Vercel
-
-The project is connected to the GitHub repository [`mkalgo1/botdownloaderbymk`](https://github.com/mkalgo1/botdownloaderbymk).
-
-1. Push your changes to `main`.
-2. Vercel automatically rebuilds and redeploys to `botdownloaderbymk.vercel.app`.
-3. To activate the Telegram Webhook, visit:
-   `https://botdownloaderbymk.vercel.app/setup`
-   or execute:
-   ```bash
-   curl -X POST "https://api.telegram.org/bot9134223706:AAGW202tOsHstyIxIUOdyjkRKdflccs8S6s/setWebhook?url=https://botdownloaderbymk.vercel.app/api/webhook"
-   ```
+| Command | Action |
+| :--- | :--- |
+| `/start` | Subscribes your chat to receive auto-downloaded uploads and shows help |
+| `/status` | Displays monitor status, total posts seen, active subscribers, and last check time |
+| `/checknow` | Forces an immediate manual check of all Facebook pages |
+| `/pages` | Lists all currently monitored Facebook pages |
+| `/addpage <url>` | Adds a new Facebook page or profile URL to monitor |
+| `/delpage <url>` | Removes a page from the monitor list |
 
 ---
 
-## 💻 Local Testing
+## 🛠️ Configuration (`.env`)
+
+```env
+BOT_TOKEN=9167130801:AAHTYJHwsVzZfJrMkTeH3V0lah2HXVDOJcE
+PORT=8080
+CHECK_INTERVAL_SECONDS=360
+TARGET_CHAT_ID=
+FB_COOKIES_FILE=cookies.txt
+```
+
+---
+
+## 💻 Running the Bot Locally
 
 ```bash
-# Clone
-git clone https://github.com/mkalgo1/botdownloaderbymk.git
-cd botdownloaderbymk
-
-# Virtual environment
-python -m venv venv
-venv\Scripts\activate  # Windows
-# source venv/bin/activate  # macOS / Linux
+# Navigate to project
+cd C:\Users\DZ_NEXTECH\.gemini\antigravity\scratch\botdownloaderbymk
 
 # Install dependencies
 pip install -r requirements.txt
 
-# Run
+# Start the bot
 python bot.py
+```
+
+---
+
+## 🐳 Running with Docker / Render
+
+The project includes a ready `Dockerfile` with static FFmpeg pre-installed:
+
+```bash
+docker build -t fb-downloader-bot .
+docker run -d --name fb_bot --env-file .env fb-downloader-bot
 ```

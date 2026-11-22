@@ -22,10 +22,200 @@ import yt_dlp
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s]: %(message)s")
 logger = logging.getLogger("VercelBot")
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "9134223706:AAGW202tOsHstyIxIUOdyjkRKdflccs8S6s")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9167130801:AAHTYJHwsVzZfJrMkTeH3V0lah2HXVDOJcE")
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 URL_REGEX = re.compile(r"https?://(?:www\.)?\S+", re.IGNORECASE)
-USER_CHAT_ID = 2140565223
+USER_CHAT_ID = int(os.getenv("TARGET_CHAT_ID", "2140565223"))
+
+FB_TARGET_PAGES = [
+    "https://web.facebook.com/profile.php?id=61556328743295",
+    "https://web.facebook.com/profile.php?id=100083193627339",
+    "https://web.facebook.com/lavialyon",
+]
+
+LAST_FB_CHECK = 0
+
+try:
+    from curl_cffi import requests as cffi_requests
+    HAS_CURL_CFFI = True
+except ImportError:
+    import requests as cffi_requests
+    HAS_CURL_CFFI = False
+
+
+def get_subscribers() -> list:
+    sub_file = os.path.join(tempfile.gettempdir(), "subscribers.json")
+    subs = [USER_CHAT_ID]
+    if os.path.exists(sub_file):
+        try:
+            with open(sub_file, "r") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, list):
+                    for s in loaded:
+                        if s not in subs:
+                            subs.append(s)
+        except Exception:
+            pass
+    return subs
+
+
+def add_subscriber(chat_id: int):
+    subs = get_subscribers()
+    if chat_id not in subs:
+        subs.append(chat_id)
+        sub_file = os.path.join(tempfile.gettempdir(), "subscribers.json")
+        try:
+            with open(sub_file, "w") as f:
+                json.dump(subs, f)
+        except Exception:
+            pass
+
+
+def get_seen_posts() -> dict:
+    seen_file = os.path.join(tempfile.gettempdir(), "seen_fb_posts.json")
+    if os.path.exists(seen_file):
+        try:
+            with open(seen_file, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_seen_post(key: str, data: dict):
+    seen = get_seen_posts()
+    seen[key] = data
+    seen_file = os.path.join(tempfile.gettempdir(), "seen_fb_posts.json")
+    try:
+        with open(seen_file, "w") as f:
+            json.dump(seen, f)
+    except Exception:
+        pass
+
+
+def check_facebook_pages_sync(target_chat_ids: list = None) -> int:
+    """
+    Polite Facebook check pass for serverless ping trigger.
+    Inspects FB_TARGET_PAGES, extracts new reels/videos/photos,
+    and sends them to registered subscriber chats.
+    """
+    global LAST_FB_CHECK
+    import time
+    LAST_FB_CHECK = time.time()
+    seen = get_seen_posts()
+    subscribers = target_chat_ids or get_subscribers()
+    new_found = 0
+
+    headers = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,fr;q=0.8",
+        "Cache-Control": "max-age=0",
+        "Sec-Ch-Ua": '"Not A(Brand";v="99", "Google Chrome";v="120", "Chromium";v="120"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+    }
+
+    for page_url in FB_TARGET_PAGES:
+        try:
+            if HAS_CURL_CFFI:
+                sess = cffi_requests.Session(impersonate="chrome120")
+                resp = sess.get(page_url, headers=headers, timeout=15, allow_redirects=True)
+            else:
+                resp = cffi_requests.get(page_url, headers=headers, timeout=15, allow_redirects=True)
+
+            if resp.status_code != 200:
+                continue
+
+            html = resp.text
+            scripts = re.findall(r'<script type="application/json"[^>]*>(.*?)</script>', html)
+            page_name = "Facebook Page"
+            tm = re.search(r'<title>([^<]+)</title>', html)
+            if tm:
+                raw_t = tm.group(1).replace(" | Facebook", "").replace(" - Facebook", "").strip()
+                if raw_t and "log in" not in raw_t.lower() and "error" not in raw_t.lower():
+                    page_name = raw_t
+
+            posts = []
+
+            def parse_rec(obj):
+                if isinstance(obj, dict):
+                    plink = obj.get("permalink_url") or obj.get("url")
+                    pid = obj.get("post_id") or obj.get("id")
+                    if plink and isinstance(plink, str):
+                        clean_l = plink.split("?")[0].rstrip("/")
+                        is_reel = "/reel/" in clean_l
+                        is_vid = "/videos/" in clean_l or "watch" in clean_l
+                        is_ph = "/photo.php" in plink or "/posts/" in clean_l
+                        if is_reel or is_vid or is_ph:
+                            msg_t = ""
+                            m_obj = obj.get("message")
+                            if isinstance(m_obj, dict):
+                                msg_t = m_obj.get("text", "")
+                            elif isinstance(m_obj, str):
+                                msg_t = m_obj
+                            posts.append({
+                                "id": str(pid) if pid else clean_l,
+                                "url": plink,
+                                "clean_url": clean_l,
+                                "type": "video" if (is_reel or is_vid) else "photo",
+                                "title": msg_t,
+                                "page_name": page_name
+                            })
+                    for v in obj.values():
+                        parse_rec(v)
+                elif isinstance(obj, list):
+                    for it in obj:
+                        parse_rec(it)
+
+            for scr in scripts:
+                try:
+                    data = json.loads(scr)
+                    parse_rec(data)
+                except Exception:
+                    continue
+
+            # First run: seed cache so we don't spam old history
+            first_run = len(seen) == 0
+
+            for p in posts:
+                key = p["id"]
+                clean_l = p["clean_url"]
+                if key in seen or clean_l in seen:
+                    continue
+
+                seen_data = {"url": clean_l, "time": int(time.time()), "title": p["title"]}
+                save_seen_post(key, seen_data)
+                save_seen_post(clean_l, seen_data)
+
+                if first_run:
+                    continue
+
+                new_found += 1
+                logger.info(f"Vercel FB Checker: New post {clean_l} from {page_name}")
+
+                # Dispatch download and delivery to subscribers
+                caption_msg = f"🔔 **New {p['type'].capitalize()} Uploaded!**\n📘 **Page:** {page_name}\n"
+                if p["title"]:
+                    caption_msg += f"📌 {p['title'][:150]}\n"
+                caption_msg += f"\n🔗 [Original Link]({p['url']})"
+
+                for sid in subscribers:
+                    try:
+                        status_id = send_telegram_message(sid, caption_msg)
+                        platform_dict = {"name": "Facebook", "emoji": "📘", "desc": "Facebook Video"}
+                        process_url_and_reply(sid, p["url"], platform_dict, status_id)
+                    except Exception as se:
+                        logger.error(f"Error dispatching to {sid}: {se}")
+
+        except Exception as pe:
+            logger.error(f"Error checking page {page_url}: {pe}")
+
+    return new_found
 
 # -------------------------------------------------------------------
 # PLATFORM DETECTOR
@@ -1497,12 +1687,25 @@ class handler(BaseHTTPRequestHandler):
             return
 
         if action == "ping" or "ping" in full_path:
+            import time
+            global LAST_FB_CHECK
+            new_posts = 0
+            if time.time() - LAST_FB_CHECK > 180:
+                try:
+                    new_posts = check_facebook_pages_sync()
+                except Exception as fbe:
+                    logger.warning(f"FB check on ping error: {fbe}")
+
             self._send_json(200, {
                 "status": "pong",
                 "message": "Bot is awake and running 24/7 on Vercel",
-                "service": "Universal Media Downloader Bot",
-                "bot": "@vidsmkdownloaderbot",
-                "ping_url": "https://botdownloaderbymk.vercel.app/ping"
+                "service": "Universal Media Downloader & Facebook Page Auto-Checker Bot",
+                "bot": "@fbdownloaderpagesvidsbot",
+                "ping_url": "https://botdownloaderbymk.vercel.app/ping",
+                "monitored_pages": FB_TARGET_PAGES,
+                "subscribers_count": len(get_subscribers()),
+                "new_posts_found": new_posts,
+                "last_check_timestamp": LAST_FB_CHECK
             })
             return
 
@@ -1522,13 +1725,14 @@ class handler(BaseHTTPRequestHandler):
 
         self._send_json(200, {
             "status": "online",
-            "service": "Downloader Mk - Telegram Universal Media Bot",
-            "bot_username": "@vidsmkdownloaderbot",
+            "service": "Universal Media Downloader & Facebook Auto-Checker Bot",
+            "bot_username": "@fbdownloaderpagesvidsbot",
             "endpoints": {
                 "ios_shortcut_page": "https://botdownloaderbymk.vercel.app/shortcut",
                 "ios_shortcut_file": "https://botdownloaderbymk.vercel.app/downloader_mk.shortcut",
                 "share_api": "https://botdownloaderbymk.vercel.app/api/share",
-                "ping": "https://botdownloaderbymk.vercel.app/ping"
+                "ping": "https://botdownloaderbymk.vercel.app/ping",
+                "setup_webhook": "https://botdownloaderbymk.vercel.app/setup"
             }
         })
 
@@ -1594,20 +1798,60 @@ class handler(BaseHTTPRequestHandler):
 
         # 1. Handle /start command
         if text.strip().startswith("/start"):
+            add_subscriber(chat_id)
+            pages_list = "\n".join([f"• `{p}`" for p in FB_TARGET_PAGES])
             send_telegram_message(
                 chat_id,
-                "⚡ **Universal Video Downloader**\n\n"
-                "Send or paste any public link from:\n"
-                "• 📸 **Instagram** (Reels, Posts, Stories)\n"
-                "• 🎵 **TikTok** (No watermark)\n"
-                "• 🔴 **YouTube** (Shorts & Standard Videos)\n"
-                "• 🐦 **X / Twitter** Media\n"
-                "• 👽 **Reddit** Clips\n"
-                "• 📘 **Facebook** Videos\n"
-                "• 🟣 **Twitch, Pinterest, Vimeo**, etc.\n\n"
-                "📲 **iOS Shortcut:** Install the shortcut at https://botdownloaderbymk.vercel.app/shortcut to share links directly from any app without copying & pasting!"
+                "🤖 **Facebook Auto-Checker & Media Downloader Bot**\n\n"
+                "✅ **You are now registered!**\n"
+                "Whenever any monitored Facebook page uploads a new video, reel, or photo, "
+                "it will be automatically downloaded and delivered straight here!\n\n"
+                "📋 **Currently Monitored Pages:**\n"
+                f"{pages_list}\n\n"
+                "🛠 **Commands:**\n"
+                "• `/checknow` - Run an immediate check of all Facebook pages\n"
+                "• `/status` - View monitor status and seen posts\n"
+                "• `/pages` - List all monitored pages\n\n"
+                "💡 *You can also paste any link from Instagram, TikTok, YouTube, Reddit, Facebook, Pinterest to download it on demand!*\n\n"
+                "📲 **iOS Shortcut:** Install at https://botdownloaderbymk.vercel.app/shortcut"
             )
             self._send_json(200, {"status": "start_command_handled"})
+            return
+
+        # 2. Handle /checknow command
+        if text.strip().startswith("/checknow"):
+            status_id = send_telegram_message(chat_id, "🔎 Checking Facebook pages for new uploads now...")
+            count = check_facebook_pages_sync(target_chat_ids=[chat_id])
+            edit_telegram_message(
+                chat_id,
+                status_id,
+                f"✅ Check pass completed!\n• Pages inspected: {len(FB_TARGET_PAGES)}\n• New uploads delivered: {count}"
+            )
+            self._send_json(200, {"status": "checknow_handled", "found": count})
+            return
+
+        # 3. Handle /status command
+        if text.strip().startswith("/status"):
+            seen = get_seen_posts()
+            subs = get_subscribers()
+            send_telegram_message(
+                chat_id,
+                "📊 **Bot & Monitor Status**\n\n"
+                f"• **Platform:** 🟢 24/7 Serverless on Vercel\n"
+                f"• **Bot:** `@fbdownloaderpagesvidsbot`\n"
+                f"• **Monitored Pages:** {len(FB_TARGET_PAGES)}\n"
+                f"• **Subscribed Chats:** {len(subs)}\n"
+                f"• **Seen Posts in DB:** {len(seen)}\n"
+                f"• **Ping URL (Keep-Alive):** `https://botdownloaderbymk.vercel.app/ping`"
+            )
+            self._send_json(200, {"status": "status_handled"})
+            return
+
+        # 4. Handle /pages command
+        if text.strip().startswith("/pages"):
+            pages_list = "\n".join([f"{idx+1}. `{p}`" for idx, p in enumerate(FB_TARGET_PAGES)])
+            send_telegram_message(chat_id, f"📋 **Monitored Facebook Pages ({len(FB_TARGET_PAGES)}):**\n\n{pages_list}")
+            self._send_json(200, {"status": "pages_handled"})
             return
 
         # 2. Check for URL

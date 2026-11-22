@@ -14,8 +14,14 @@ import aiohttp
 from aiohttp import web
 import yt_dlp
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.types import FSInputFile, Message
+from dotenv import load_dotenv
+
+# Load local environment
+load_dotenv()
+
+from fb_monitor import FacebookMonitor, DEFAULT_PAGES
 
 # -------------------------------------------------------------------
 # LOGGING SETUP
@@ -29,7 +35,7 @@ logger = logging.getLogger("MediaDownloaderBot")
 # -------------------------------------------------------------------
 # ENVIRONMENT & THRESHOLDS
 # -------------------------------------------------------------------
-BOT_TOKEN = os.getenv("BOT_TOKEN", "9134223706:AAGW202tOsHstyIxIUOdyjkRKdflccs8S6s")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "9167130801:AAHTYJHwsVzZfJrMkTeH3V0lah2HXVDOJcE")
 if not BOT_TOKEN:
     logger.critical("BOT_TOKEN environment variable is missing! Halting execution.")
     sys.exit(1)
@@ -37,14 +43,28 @@ if not BOT_TOKEN:
 MAX_TELEGRAM_BYTES = 48 * 1024 * 1024       # 48 MB safety margin for 50 MB Telegram API limit
 TARGET_COMPRESSED_BYTES = 44 * 1024 * 1024  # 44 MB target for large video compression
 MAX_VIDEO_DURATION_SECONDS = 3600           # 60 minutes limit
-MAX_CONCURRENT_TASKS = 2                    # Prevents memory and CPU oversubscription
+MAX_CONCURRENT_TASKS = 3                    # Concurrency semaphore
 PORT = int(os.getenv("PORT", "8080"))
+CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "360"))
+
+# Target chat ID from env if provided
+TARGET_CHAT_ID = int(os.getenv("TARGET_CHAT_ID")) if os.getenv("TARGET_CHAT_ID") else None
 
 URL_REGEX = re.compile(r"https?://(?:www\.)?\S+", re.IGNORECASE)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 DOWNLOAD_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+
+# Initialize Facebook Monitor
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+fb_monitor = FacebookMonitor(
+    bot=bot,
+    data_dir=BASE_DIR,
+    target_chat_ids=[TARGET_CHAT_ID] if TARGET_CHAT_ID else [],
+    check_interval=CHECK_INTERVAL_SECONDS,
+    pages=DEFAULT_PAGES,
+)
 
 
 # -------------------------------------------------------------------
@@ -77,31 +97,30 @@ def detect_platform(url: str) -> dict:
 
 
 # -------------------------------------------------------------------
-# KEEP-ALIVE HTTP SERVER (PREVENTS BOT SLEEP ON RENDER/KOYEB/ETC)
+# KEEP-ALIVE HTTP SERVER (PREVENTS SLEEP ON RENDER / CLOUD HOSTS)
 # -------------------------------------------------------------------
 async def ping_handler(request: web.Request) -> web.Response:
     return web.json_response({
         "status": "pong",
-        "message": "Bot is awake and running 24/7",
-        "service": "Universal Media Downloader Bot",
-        "bot": "@vidsmkdownloaderbot",
-        "ping_url": "https://botdownloaderbymk.vercel.app/ping"
+        "message": "Facebook Auto-Checker & Media Downloader Bot is running 24/7",
+        "monitored_pages": len(fb_monitor.pages),
+        "subscribers": len(fb_monitor.subscribers),
+        "seen_posts_count": len(fb_monitor.seen_posts),
     })
 
 async def health_handler(request: web.Request) -> web.Response:
     return web.json_response({
         "status": "healthy",
+        "is_checking": fb_monitor.is_checking,
+        "consecutive_errors": fb_monitor.consecutive_errors,
         "active_downloads": MAX_CONCURRENT_TASKS - DOWNLOAD_SEMAPHORE._value
     })
 
 async def root_handler(request: web.Request) -> web.Response:
     return web.json_response({
         "status": "alive",
-        "service": "Universal Media Downloader Bot",
-        "endpoints": {
-            "ping": "/ping",
-            "health": "/health"
-        }
+        "service": "Facebook Auto-Checker & Media Downloader Bot",
+        "endpoints": {"ping": "/ping", "health": "/health"}
     })
 
 def create_web_app() -> web.Application:
@@ -121,16 +140,16 @@ async def start_web_server() -> web.AppRunner:
     return runner
 
 async def self_ping_worker():
-    """Optional auto-ping background loop if PING_URL or RENDER_EXTERNAL_URL is set."""
+    """Auto-ping background loop if PING_URL or RENDER_EXTERNAL_URL is set."""
     target_url = os.getenv("PING_URL") or os.getenv("RENDER_EXTERNAL_URL")
     if not target_url:
-        target_url = "https://botdownloaderbymk.vercel.app/ping"
+        return
 
     if not target_url.endswith("/ping"):
         target_url = target_url.rstrip("/") + "/ping"
 
     logger.info(f"Self-ping worker initialized for target: {target_url}")
-    await asyncio.sleep(60)  # Wait 1 min before starting ping cycle
+    await asyncio.sleep(60)
     async with aiohttp.ClientSession() as session:
         while True:
             try:
@@ -138,7 +157,7 @@ async def self_ping_worker():
                     logger.info(f"Keep-alive self-ping sent -> Status: {resp.status}")
             except Exception as e:
                 logger.warning(f"Self-ping failed (non-critical): {e}")
-            await asyncio.sleep(10 * 60)  # Ping every 10 minutes
+            await asyncio.sleep(10 * 60)
 
 
 # -------------------------------------------------------------------
@@ -208,6 +227,7 @@ def run_adaptive_compression(input_path: str, output_path: str, duration: float)
 # -------------------------------------------------------------------
 def download_and_process_sync(url: str, working_dir: str) -> Tuple[Optional[str], Dict]:
     out_template = os.path.join(working_dir, "raw_stream.%(ext)s")
+    cookies_file = os.getenv("FB_COOKIES_FILE", os.path.join(BASE_DIR, "cookies.txt"))
 
     ydl_opts = {
         "outtmpl": out_template,
@@ -219,7 +239,6 @@ def download_and_process_sync(url: str, working_dir: str) -> Tuple[Optional[str]
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-us,en;q=0.5",
         },
         "postprocessors": [
             {
@@ -228,6 +247,8 @@ def download_and_process_sync(url: str, working_dir: str) -> Tuple[Optional[str]
             }
         ],
     }
+    if os.path.exists(cookies_file):
+        ydl_opts["cookiefile"] = cookies_file
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -264,24 +285,107 @@ def download_and_process_sync(url: str, working_dir: str) -> Tuple[Optional[str]
 
 
 # -------------------------------------------------------------------
-# ROUTERS & HANDLERS
+# BOT COMMAND HANDLERS
 # -------------------------------------------------------------------
 @dp.message(CommandStart())
 async def cmd_start(msg: Message):
+    fb_monitor.add_subscriber(msg.chat.id)
+    pages_text = "\n".join([f"• `{p}`" for p in fb_monitor.pages])
     await msg.reply(
-        "⚡ **Universal Video Downloader**\n\n"
-        "Send or paste any public video link from:\n"
-        "• 📸 **Instagram** (Reels, Posts, Stories)\n"
-        "• 🎵 **TikTok** (No watermark)\n"
-        "• 🔴 **YouTube** (Shorts & Standard Videos)\n"
-        "• 🐦 **X / Twitter** Media\n"
-        "• 👽 **Reddit** Clips\n"
-        "• 📘 **Facebook** Videos\n"
-        "• 🟣 **Twitch, Pinterest, Vimeo**, etc.\n\n"
-        "I will detect the platform automatically and optimize the video for instant playback!"
+        "🤖 **Facebook Auto-Checker & Media Downloader Bot**\n\n"
+        "✅ **You are now registered!**\n"
+        "Whenever any monitored Facebook page uploads a new video, reel, or photo, "
+        "it will be automatically downloaded and delivered straight here!\n\n"
+        "📋 **Currently Monitored Pages:**\n"
+        f"{pages_text}\n\n"
+        "🛠 **Commands:**\n"
+        "• `/status` - Check monitor status & seen post count\n"
+        "• `/checknow` - Run an immediate check of all pages\n"
+        "• `/pages` - List all monitored pages\n"
+        "• `/addpage <url>` - Add a Facebook page to monitor\n"
+        "• `/delpage <url>` - Remove a page from monitor\n\n"
+        "💡 *You can also paste any video link from Instagram, TikTok, YouTube, Reddit, Facebook, Pinterest to download it on demand!*"
     )
 
 
+@dp.message(Command("status"))
+async def cmd_status(msg: Message):
+    last_check_str = "Never"
+    if fb_monitor.last_check_time:
+        import datetime
+        dt = datetime.datetime.fromtimestamp(fb_monitor.last_check_time)
+        last_check_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    await msg.reply(
+        "📊 **Bot & Monitor Status**\n\n"
+        f"• **Status:** {'🔄 Checking now...' if fb_monitor.is_checking else '🟢 Idle / Monitoring'}\n"
+        f"• **Monitored Pages:** {len(fb_monitor.pages)}\n"
+        f"• **Total Posts Seen in DB:** {len(fb_monitor.seen_posts)}\n"
+        f"• **Subscribed Chats:** {len(fb_monitor.subscribers)}\n"
+        f"• **Last Check Pass:** {last_check_str}\n"
+        f"• **Check Interval:** ~{fb_monitor.check_interval}s (with anti-block jitter)\n"
+        f"• **Consecutive Errors:** {fb_monitor.consecutive_errors}"
+    )
+
+
+@dp.message(Command("checknow"))
+async def cmd_checknow(msg: Message):
+    if fb_monitor.is_checking:
+        await msg.reply("⏳ A check is already in progress. Please wait a moment.")
+        return
+
+    status_msg = await msg.reply("🔎 Checking Facebook pages for new uploads now...")
+    count = await fb_monitor.check_pages_once()
+    await status_msg.edit_text(
+        f"✅ Check pass finished!\n"
+        f"• Pages inspected: {len(fb_monitor.pages)}\n"
+        f"• New uploads discovered & delivered: {count}"
+    )
+
+
+@dp.message(Command("pages"))
+async def cmd_pages(msg: Message):
+    if not fb_monitor.pages:
+        await msg.reply("No Facebook pages are currently being monitored.")
+        return
+    pages_list = "\n".join([f"{idx+1}. `{p}`" for idx, p in enumerate(fb_monitor.pages)])
+    await msg.reply(f"📋 **Monitored Facebook Pages ({len(fb_monitor.pages)}):**\n\n{pages_list}")
+
+
+@dp.message(Command("addpage"))
+async def cmd_addpage(msg: Message):
+    parts = msg.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await msg.reply("⚠️ Usage: `/addpage https://web.facebook.com/...`")
+        return
+    page_url = parts[1].strip()
+    if not ("facebook.com" in page_url.lower() or "fb.watch" in page_url.lower()):
+        await msg.reply("❌ Invalid URL. Please provide a valid Facebook page or profile link.")
+        return
+    added = fb_monitor.add_page(page_url)
+    if added:
+        await msg.reply(f"✅ Added page to monitor:\n`{page_url}`")
+    else:
+        await msg.reply("ℹ️ This page is already in the monitor list.")
+
+
+@dp.message(Command("delpage"))
+async def cmd_delpage(msg: Message):
+    parts = msg.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await msg.reply("⚠️ Usage: `/delpage <url or id>`")
+        return
+    target = parts[1].strip()
+    removed = fb_monitor.remove_page(target)
+    if removed:
+        await msg.reply(f"🗑 Removed page from monitor: `{target}`")
+    else:
+        await msg.reply("❌ Could not find a matching page to remove.")
+
+
+# -------------------------------------------------------------------
+# DIRECT ON-DEMAND LINK DOWNLOADER (UNIVERSAL)
+# -------------------------------------------------------------------
 @dp.message(F.text)
 async def process_link(msg: Message):
     match = URL_REGEX.search(msg.text)
@@ -325,7 +429,7 @@ async def process_link(msg: Message):
 
             await msg.reply_video(
                 video=payload,
-                caption=f"🎬 **{platform['emoji']} {platform['name']}**\n\n📌 {title[:80]}",
+                caption=f"🎬 **{platform['emoji']} {platform['name']}**\n\n📌 {title[:120]}",
                 duration=duration,
                 width=width,
                 height=height,
@@ -350,15 +454,20 @@ async def process_link(msg: Message):
 # APPLICATION ENTRYPOINT
 # -------------------------------------------------------------------
 async def main():
-    logger.info("Initializing bot worker and ping server...")
+    logger.info("Initializing bot worker, web server, and Facebook auto-checker...")
     web_runner = await start_web_server()
     asyncio.create_task(self_ping_worker())
     
+    # Launch Facebook Monitor background loop
+    monitor_task = asyncio.create_task(fb_monitor.start_loop())
+
     logger.info("Starting Telegram long polling...")
     await bot.delete_webhook(drop_pending_updates=True)
     try:
         await dp.start_polling(bot)
     finally:
+        fb_monitor.stop()
+        monitor_task.cancel()
         await web_runner.cleanup()
 
 
