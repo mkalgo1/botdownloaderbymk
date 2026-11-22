@@ -422,8 +422,15 @@ async def process_link(msg: Message):
 
             title = info.get("title", f"{platform['name']} Video")
             duration = int(info.get("duration", 0)) if info.get("duration") else None
-            width = info.get("width")
-            height = info.get("height")
+            width = int(info.get("width")) if info.get("width") else None
+            height = int(info.get("height")) if info.get("height") else None
+
+            # Enforce exact native display aspect ratio (prevents square crop)
+            if not width or not height or not duration:
+                ew, eh, ed = fb_monitor.get_exact_video_dimensions(final_path)
+                width = width or ew or None
+                height = height or eh or None
+                duration = duration or ed or None
 
             payload = FSInputFile(final_path, filename=f"video_{uuid.uuid4().hex[:6]}.mp4")
 

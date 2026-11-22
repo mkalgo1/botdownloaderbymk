@@ -1282,6 +1282,12 @@ def process_url_and_reply(chat_id: int, url: str, platform: dict, status_msg_id:
             if vid_d:
                 duration = vid_d
 
+            # Ensure width & height are never None to prevent Telegram 320x320 square crop fallback
+            if not vid_width or not vid_height:
+                w_cand, h_cand = extract_mp4_dimensions(final_video_file)
+                if w_cand and h_cand:
+                    vid_width, vid_height = w_cand, h_cand
+
         # 6. Upload to Telegram (Photo vs Video)
         if media_type == "image":
             edit_telegram_message(

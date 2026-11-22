@@ -348,6 +348,42 @@ class FacebookMonitor:
 
         return video_path, thumb_path, info
 
+    def get_exact_video_dimensions(self, file_path: str) -> Tuple[int, int, int]:
+        """
+        Extracts exact display width, height, and duration with rotation normalization.
+        Guarantees Telegram receives native aspect ratio (e.g. 1080x1920 for 9:16 reels).
+        """
+        w, h, dur = 0, 0, 0
+        try:
+            cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", "-show_format", file_path]
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8)
+            if res.returncode == 0:
+                data = json.loads(res.stdout)
+                for s in data.get("streams", []):
+                    if s.get("codec_type") == "video":
+                        w = int(s.get("width", 0))
+                        h = int(s.get("height", 0))
+                        rot = 0
+                        if s.get("tags", {}).get("rotate"):
+                            try:
+                                rot = int(s["tags"]["rotate"])
+                            except Exception:
+                                pass
+                        for sd in s.get("side_data_list", []):
+                            if "rotation" in sd:
+                                try:
+                                    rot = int(sd["rotation"])
+                                except Exception:
+                                    pass
+                        if rot in [90, 270, -90, -270]:
+                            w, h = h, w
+                        d = float(s.get("duration") or data.get("format", {}).get("duration") or 0)
+                        dur = int(d)
+                        break
+        except Exception as e:
+            logger.warning(f"ffprobe dimension check warning: {e}")
+        return w, h, dur
+
     async def _download_and_broadcast(self, post: dict):
         """
         Downloads the media and sends it to all subscribers.
@@ -396,8 +432,15 @@ class FacebookMonitor:
 
                 thumb_input = FSInputFile(thumb_path) if thumb_path and os.path.exists(thumb_path) else None
                 duration = int(info.get("duration", 0)) if info.get("duration") else None
-                width = info.get("width")
-                height = info.get("height")
+                width = int(info.get("width")) if info.get("width") else None
+                height = int(info.get("height")) if info.get("height") else None
+
+                # Fallback to direct inspection to guarantee exact native aspect ratio
+                if not width or not height or not duration:
+                    exact_w, exact_h, exact_dur = self.get_exact_video_dimensions(video_path)
+                    width = width or exact_w or 1080
+                    height = height or exact_h or 1920
+                    duration = duration or exact_dur
 
                 for chat_id in list(self.subscribers):
                     try:
