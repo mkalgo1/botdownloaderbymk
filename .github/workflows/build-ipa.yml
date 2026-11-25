@@ -1,0 +1,78 @@
+name: Build iOS IPA for AltStore
+
+on:
+  push:
+    paths:
+      - 'ios_app/**'
+      - '.github/workflows/build-ipa.yml'
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build VideoSender.ipa
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+
+      - name: Build VideoSender App Archive
+        run: |
+          cd ios_app
+          xcodebuild clean archive \
+            -project VideoSender.xcodeproj \
+            -scheme VideoSender \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            -archivePath build/VideoSender.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: Package Payload into VideoSender.ipa
+        run: |
+          cd ios_app
+          mkdir -p build/ipa/Payload
+          cp -R build/VideoSender.xcarchive/Products/Applications/VideoSender.app build/ipa/Payload/
+          cd build/ipa
+          zip -qr ../../VideoSender.ipa Payload
+          cd ../..
+          ls -lh VideoSender.ipa
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VideoSender-iOS-App
+          path: VideoSender.ipa
+          retention-days: 30
+
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/heads/main')
+        with:
+          tag_name: v1.0.0-ios
+          name: "VideoSender iOS App for AltStore (v1.0.0)"
+          body: |
+            ### 📱 Telegram Video Sender iOS App (.ipa)
+            
+            This iOS IPA allows you to share any video or link from TikTok, Instagram, YouTube, Photos, or Safari directly to your Telegram Bot (`@vidsmkdownloaderbot`).
+            
+            #### 🚀 How to Install with AltStore / SideStore / TrollStore:
+            1. Download `VideoSender.ipa` on your iPhone using Safari.
+            2. Open **AltStore**, tap the **My Apps** tab, then tap **`+`** in the top-left corner.
+            3. Select `VideoSender.ipa`.
+            4. AltStore will sign and install the app to your home screen!
+            5. In TikTok / Instagram / Photos, tap **Share** -> select **Video Sender** -> Video arrives in your Telegram bot chat!
+          files: VideoSender.ipa
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

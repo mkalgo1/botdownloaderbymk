@@ -9,3 +9,5 @@ env/
 *.part
 *.temp
 .DS_Store
+
+ios_app/build_local/
